@@ -1,6 +1,7 @@
 import strutils
 import macros
 import sequtils
+import unittest
 
 
 {.experimental.}  # for automatic dereferencing
@@ -8,32 +9,33 @@ import sequtils
 
 type
 
-    SlicedArray*[T] = object of RootObj
+  SlicedArray*[T] = object of RootObj
 
-        shape*: seq[int]
-        ndim*: int
-        size*: int
-        stride*: seq[int]
-        offset*: int
-        data*: ptr seq[T]  # usually points to dataPrivate
-        dataPrivate: seq[T]
+    shape*: seq[int]
+    ndim*: int
+    size*: int
+    stride*: seq[int]
+    offset*: int
+    data*: ptr seq[T]  # usually points to dataPrivate
+    dataPrivate: seq[T]
 
 
 proc initNilSlicedArray[T](shape: openarray[int]): SlicedArray[T] =
 
-    result.data = nil
-    result.shape = @shape  # copies deeply
-    result.ndim = len(shape)
-    result.size = shape.foldl(a*b)
-    if result.size < 1:
-        raise newException(RangeError, "SlicedArray shape must be list of integers > 0")
+  result.data = nil
+  result.shape = @shape  # copies deeply
+  result.ndim = len(shape)
+  result.size = shape.foldl(a*b)
+  for i in result.shape:
+    if i < 1:
+      raise newException(RangeError, "SlicedArray shape must be list of integers > 0")
 
-    result.stride = newSeq[int](result.ndim)
-    result.stride[result.ndim-1] = 1
-    for i in countdown(result.ndim-1, 1):
-        result.stride[i-1] = result.stride[i]*shape[i]
+  result.stride = newSeq[int](result.ndim)
+  result.stride[result.ndim-1] = 1
+  for i in countdown(result.ndim-1, 1):
+    result.stride[i-1] = result.stride[i]*shape[i]
 
-    result.offset = 0
+  result.offset = 0
 
 
 proc initSlicedArray*[T](shape: openarray[int]): SlicedArray[T] =
@@ -46,58 +48,58 @@ proc initSlicedArray*[T](shape: openarray[int]): SlicedArray[T] =
 
 proc initSlicedArrayOnSeq*[T](shape: openarray[int], data: ptr seq[T]): SlicedArray[T] =
 
-    result = initNilSlicedArray[T](shape)
-    if result.size > len(data):
-        raise newException(RangeError, "SlicedArray shape is larger than provided buffer")
+  result = initNilSlicedArray[T](shape)
+  if result.size > len(data):
+    raise newException(RangeError, "SlicedArray shape is larger than provided buffer")
 
-    result.data = data
+  result.data = data
 
 
 proc `[]`*[T](arr: SlicedArray[T], ix: varargs[int]): T =
 
-    var args = @ix  # varargs are not mutable
+  var args = @ix  # varargs are not mutable
 
+  when compileOption("boundChecks"):
+    if len(args) != arr.ndim:
+      raise newException(IndexError, "SlicedArray index must match shape")
+
+  var flatix = arr.offset
+  for i in 0..(len(args)-1):
     when compileOption("boundChecks"):
-        if len(args) != arr.ndim:
-            raise newException(IndexError, "SlicedArray index must match shape")
+      if args[i] >= arr.shape[i] or args[i] < -arr.shape[i]:
+        raise newException(IndexError, "SlicedArray index is out of bounds")
+    if args[i] < 0:
+      args[i] += arr.shape[i]
+    flatix += args[i] * arr.stride[i]
 
-    var flatix = arr.offset
-    for i in 0..(len(args)-1):
-        when compileOption("boundChecks"):
-            if args[i] >= arr.shape[i] or args[i] < -arr.shape[i]:
-                raise newException(IndexError, "SlicedArray index is out of bounds")
-        if args[i] < 0:
-            args[i] += arr.shape[i]
-        flatix += args[i] * arr.stride[i]
-
-    result = arr.data[flatix]
+  result = arr.data[flatix]
 
 
 proc `[]=`*[T](arr: SlicedArray[T], ix: varargs[int], rhs: T) =
 
+  when compileOption("boundChecks"):
+    if len(ix) != arr.ndim:
+      raise newException(IndexError, "SlicedArray index must match shape")
+
+  var flatix = arr.offset
+  for i, v in ix:
     when compileOption("boundChecks"):
-        if len(ix) != arr.ndim:
-            raise newException(IndexError, "SlicedArray index must match shape")
+      if v >= arr.shape[i] or v < -arr.shape[i]:
+        raise newException(IndexError, "SlicedArray index is out of bounds")
+    var temp = v
+    if v < 0:
+      temp += arr.shape[i]
+    flatix += temp * arr.stride[i]
 
-    var flatix = arr.offset
-    for i, v in ix:
-        when compileOption("boundChecks"):
-            if v >= arr.shape[i] or v < -arr.shape[i]:
-                raise newException(IndexError, "SlicedArray index is out of bounds")
-        var temp = v
-        if v < 0:
-            temp += arr.shape[i]
-        flatix += temp * arr.stride[i]
-
-    arr.data[flatix] = rhs
+  arr.data[flatix] = rhs
 
 
 type
 
-    SteppedSlice* = object of RootObj
-        a*, b*: int 
-        step*: int
-        incEnd*: bool
+  SteppedSlice* = object of RootObj
+    a*, b*: int 
+    step*: int
+    incEnd*: bool
 
 
 proc initSteppedSlice*(a, b, step: int, incEnd: bool): SteppedSlice =
@@ -404,128 +406,198 @@ proc `[]`*[T](arr: SlicedArray[T], ix: varargs[SteppedSlice]): SlicedArray[T] =
 when isMainModule:
 
 
-    var raw = newSeq[int](36)
-    for i in 0..35:
-        raw[i] = i
+  var raw = newSeq[int](36)
+  for i in 0..35:
+      raw[i] = i
 
-#    var shape = newSeq[int](3)
-#    shape[0] = 3
-#    shape[1] = 4
-#    shape[2] = 3
-    let arr = initSlicedArrayOnSeq([3,4,3], addr(raw))
+  test "Size bigger than than underlying raw buffer throws RangeError":
+    expect RangeError:
+      discard initSlicedArrayOnSeq([3,4,4], addr(raw))
 
-    echo "arr manipulations"
-    echo ""
+  test "Nonsensical shape throws RangeError":
+    expect RangeError:
+      discard initSlicedArrayOnSeq([-3,4,3], addr(raw))
+    expect RangeError:
+      discard initSlicedArrayOnSeq([3,-4,3], addr(raw))
+    expect RangeError:
+      discard initSlicedArrayOnSeq([3,4,-3], addr(raw))
+    expect RangeError:
+      discard initSlicedArrayOnSeq([3,-4,-3], addr(raw))
+    expect RangeError:
+      discard initSlicedArrayOnSeq([-3,-4,-3], addr(raw))
 
-    echo "shape= " & $arr.shape
-    echo "size= " & $arr.size
-    echo "dim= " & $arr.ndim
-    echo "stride= " & $arr.stride
-    echo "offset= " & $arr.offset
-    echo "rawdata= " & $arr.data
-    
-    #echo "arr[3,0,0]= " & $arr[3,0,0]  # should throw
-    #echo "arr[0,4,0]= " & $arr[0,4,0]  # should throw
-    #echo "arr[0,0,3]= " & $arr[0,0,3]  # should throw
-    #echo "arr[-4,0,0]= " & $arr[-4,0,0] # should throw
-    #echo "arr[0,-5,0]= " & $arr[0,-5,0] # should throw
-    #echo "arr[0,0,-4]= " & $arr[0,0,-4] # should throw
 
-    echo ""
-    echo "Iterate forward through the seq (shows that indexing works)"
+  var arr = initSlicedArrayOnSeq([3,4,3], addr(raw))
+
+  test "Shape, size, ndim, stride, offset, data, are correct":
+    check arr.shape == @[3,4,3]
+    check arr.size == 36
+    check arr.ndim == 3
+    check arr.stride == @[12,3,1]
+    check arr.offset == 0
+    check arr.data == addr(raw)
+  
+  test "Invalid index shape throws IndexError":
+    expect IndexError:
+      discard arr[0,0,0,0]
+    expect IndexError:
+      discard arr[0,0]
+    expect IndexError:
+      arr[0,0,0,0] = 0
+    expect IndexError:
+      arr[0,0] = 0
+
+  test "Out-of-bounds indexing throws IndexError":
+    expect IndexError:
+      discard arr[3,0,0]
+    expect IndexError:
+      discard arr[0,4,0]
+    expect IndexError:
+      discard arr[0,0,3]
+    expect IndexError:
+      discard arr[-4,0,0]
+    expect IndexError:
+      discard arr[0,-5,0]
+    expect IndexError:
+      discard arr[0,0,-4]
+
+  test "Iterating through the array returns expected values":
     for i in 0..2:
-        for j in 0..3:
-            for k in 0..2:
-                echo "arr[$#,$#,$#]= "%[$i,$j,$k] & $arr[i,j,k]
+      for j in 0..3:
+        for k in 0..2:
+          #echo "arr[$#,$#,$#]= "%[$i,$j,$k] & $arr[i,j,k]
+          check arr[i,j,k] == k + 3*j + 12*i
 
-    echo ""
-    echo "Let's do it backwards! (shows that negative indexing works)"
+  test "Iterating using negative indices is the same as iterating in reverse":
     for i in countdown(-1,-3):
-        for j in countdown(-1,-4):
-            for k in countdown(-1,-3):
-                echo "arr[$#,$#,$#]= "%[$i,$j,$k] & $arr[i,j,k]
+      for j in countdown(-1,-4):
+        for k in countdown(-1,-3):
+          check arr[i,j,k] == (3+k) + 3*(4+j) + 12*(3+i)
 
-    echo ""
-    echo "Now let's reverse (by hand) the seq (shows that assignment works with positive and negative indices)"
+  test "Assignment works for both positive and negative indices (let's reverse the underlying data)":
     for i in 0..2:
-        for j in 0..3:
-            for k in j..2:
-                var temp = arr[i,j,k]
-                arr[i,j,k] = arr[-i-1,-j-1,-k-1]
-                arr[-i-1,-j-1,-k-1] = temp
-    echo "rawdata= " & $arr.data
+      for j in 0..3:
+        for k in j..2:
+          var temp = arr[i,j,k]
+          arr[i,j,k] = arr[-i-1,-j-1,-k-1]
+          arr[-i-1,-j-1,-k-1] = temp
 
-    echo ""
-    echo "Let's take a shallow view that reverses it back to normal!"
-#    var revarr = arr["2:-1:-1, 3:-1:-1, 2:-1:-1"]  # support python syntax
-#    var revarr = arr["::-1, ::-1, ::-1"]  # more python syntax
-#    var revarr = arr[2..0|-1, 3..0|-1, 2..0|-1]
-#    var revarr = arr[_..0|-1, 3.._|-1, _.._|-1]
+  test "The underlying data is now reversed":
+    for i in 0..35:
+      check arr.data[i] == 35-i
+
+  test "We can \"reverse\" the array back to normal by using a strided view (note: endpoints are *inclusive*)":
+    var revarr = arr[2..0|-1, 3..0|-1, 2..0|-1]
+    for i in 0..2:
+      for j in 0..3:
+        for k in 0..2:
+          check revarr[i,j,k] == k + 3*j + 12*i
+
+  test "Notation like `..|1` also works if we desire the full range":
     var revarr = arr[..|-1, ..|-1, ..|-1]
     for i in 0..2:
-        for j in 0..3:
-            for k in 0..2:
-                echo "arr[$#,$#,$#]= "%[$i,$j,$k] & $revarr[i,j,k]
-    echo "Of course, the underlying raw data is still backwards"
-    echo "rawdata= " & $revarr.data
-    echo "shape= " & $revarr.shape
-    echo "size= " & $revarr.size
-    echo "dim= " & $revarr.ndim
-    echo "stride= " & $revarr.stride
-    echo "offset= " & $revarr.offset
+      for j in 0..3:
+        for k in 0..2:
+          check revarr[i,j,k] == k + 3*j + 12*i
 
-    echo ""
-    echo "A view of a view works - let's reverse the last index again"
-    var revrevarr = revarr[0..2, 0..3, 2..0|-1]
+  test "The symbol `_` can be substituted for any endpoint as well":
+    var revarr = arr[_..0|-1, 3.._|-1, _.._|-1]
     for i in 0..2:
-        for j in 0..3:
-            for k in 0..2:
-                echo "arr[$#,$#,$#]= "%[$i,$j,$k] & $revrevarr[i,j,k]
-    echo "shape= " & $revrevarr.shape
-    echo "size= " & $revrevarr.size
-    echo "dim= " & $revrevarr.ndim
-    echo "stride= " & $revrevarr.stride
-    echo "offset= " & $revrevarr.offset
-    
-    echo ""
-    echo "Or we can grab a subview"
-    var subrevarr = revarr[0..2|2, 0..3, 0..2]
+      for j in 0..3:
+        for k in 0..2:
+          check revarr[i,j,k] == k + 3*j + 12*i
+
+  test "Pythonic `a:b:step` syntax can be passed as a string (`b` is *excluded*)":
+    var revarr = arr["2:-1:-1, 3:-1:-1, 2:-1:-1"]
+    for i in 0..2:
+      for j in 0..3:
+        for k in 0..2:
+          check revarr[i,j,k] == k + 3*j + 12*i
+
+  test "Pythonic `::step` syntax also works":
+    var revarr = arr["::-1, ::-1, ::-1"]
+    for i in 0..2:
+      for j in 0..3:
+        for k in 0..2:
+          check revarr[i,j,k] == k + 3*j + 12*i
+
+  test "More Pythonic shorthand works, e.g. `::`, `:`, `...`":
+    var arr1 = arr["::, ::, ::"]
+    var arr2 = arr[":, :, :"]
+    var arr3 = arr["..., :, :"]
+    var arr4 = arr[":, :, ..."]
+    var arr5 = arr["..."]
+    for i in 0..2:
+      for j in 0..3:
+        for k in 0..2:
+          check arr1[i,j,k] == 35 - (k + 3*j + 12*i)
+          check arr2[i,j,k] == 35 - (k + 3*j + 12*i)
+          check arr3[i,j,k] == 35 - (k + 3*j + 12*i)
+          check arr4[i,j,k] == 35 - (k + 3*j + 12*i)
+          check arr5[i,j,k] == 35 - (k + 3*j + 12*i)
+
+  test "A view does not change the underlying data - it is still reversed":
+    var revarr = arr[..|-1, ..|-1, ..|-1]
+    for i in 0..<revarr.size:
+      check revarr.data[i] == 35 - i
+
+  test "A view is shallow - it shares the same underlying buffer":
+    var revarr = arr[..|-1, ..|-1, ..|-1]
+    revarr[0,0,0] = 123456
+    check arr[2,3,2] == 123456
+    revarr[0,0,0] = 0
+
+
+  arr = arr[..|-1, ..|-1, ..|-1]
+  test "Check that fields of the shallow view are correct":
+    check arr.shape == @[3,4,3]
+    check arr.size == 36
+    check arr.ndim == 3
+    check arr.stride == @[-12,-3,-1]
+    check arr.offset == 35
+
+  test "A view of a view works - let's reverse the last index again":
+    var revarr = arr[..|1, ..|1, ..|-1]
+    for i in 0..2:
+      for j in 0..3:
+        for k in 0..2:
+          check revarr[i,j,k] == (2-k) + 3*j + 12*i
+
+  test "Check that the fields of the shallow view were updated correctly":
+    var revarr = arr[..|1, ..|1, ..|-1]
+    check revarr.shape == @[3,4,3]
+    check revarr.size == 36
+    check revarr.ndim == 3
+    check revarr.stride == @[-12,-3,1]
+    check revarr.offset == 33
+  
+  test "Shallow views can have stepsizes other than 1":
+    var subarr = arr[..|2, ..|1, ..|1]
     for i in 0..1:  # notice how this index now goes from 0 to 1
-        for j in 0..3:
-            for k in 0..2:
-                echo "arr[$#,$#,$#]= "%[$i,$j,$k] & $subrevarr[i,j,k]
-    echo "shape= " & $subrevarr.shape
-    echo "size= " & $subrevarr.size
-    echo "dim= " & $subrevarr.ndim
-    echo "stride= " & $subrevarr.stride
-    echo "offset= " & $subrevarr.offset
+      for j in 0..3:
+        for k in 0..2:
+          check subarr[i,j,k] == k + 3*j + 12*2*i
+
+  test "Check that the fields of the shallow view were updated correctly":
+    var subarr = arr[..|2, ..|1, ..|1]
+    check subarr.shape == @[2,4,3]
+    check subarr.size == 24 
+    check subarr.ndim == 3
+    check subarr.stride == @[-24,-3,-1]
+    check subarr.offset == 35
+
+  test "We can have sub-subviews":
+    var subarr = arr[..|2, ..|1, ..|1]
+    var subsubarr = subarr[..|1, ..|2, ..|1]
+    for i in 0..1:  # notice how this index now goes from 0 to 1
+      for j in 0..1: # notice how this index now goes from 0 to 1 (the stepsize does not end exactly on the endpoint)
+        for k in 0..2:
+          check subsubarr[i,j,k] == k + 3*2*j + 12*2*i
     
-    echo ""
-    echo "Or a sub sub view"
-    var subsubrevarr = subrevarr[0..1, 1..3|2, 0..2]
-    for i in 0..1:
-        for j in 0..1:
-            for k in 0..2:
-                echo "arr[$#,$#,$#]= "%[$i,$j,$k] & $subsubrevarr[i,j,k]
-    echo "shape= " & $subsubrevarr.shape
-    echo "size= " & $subsubrevarr.size
-    echo "dim= " & $subsubrevarr.ndim
-    echo "stride= " & $subsubrevarr.stride
-    echo "offset= " & $subsubrevarr.offset
-
-    echo ""
-    var arr2 = arr[0..0, 0..1, 0..2|2]
-
-    echo "shape= " & $arr2.shape
-    echo "size= " & $arr2.size
-    echo "dim= " & $arr2.ndim
-    echo "stride= " & $arr2.stride
-    echo "offset= " & $arr2.offset
-    echo "rawdata= " & $arr2.data
-    echo "arr2[0,0,0]= " & $arr2[0,0,0]
-    echo "arr2[0,0,1]= " & $arr2[0,0,1]
-    echo "arr2[0,0,-1]= " & $arr2[0,0,-1]
-    arr2[0,0,-1] = 9
-    echo "rawdata= " & $arr2.data
-    echo "rawdata= " & $arr.data
-
+  test "Check that the fields of the shallow view were updated correctly":
+    var subarr = arr[..|2, ..|2, ..|1]
+    check subarr.shape == @[2,2,3]
+    check subarr.size == 12 
+    check subarr.ndim == 3
+    check subarr.stride == @[-24,-6,-1]
+    check subarr.offset == 35
