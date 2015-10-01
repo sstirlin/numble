@@ -56,43 +56,32 @@ proc initSlicedArrayOnSeq*[T](shape: openarray[int], data: ptr seq[T]): SlicedAr
   result.data = data
 
 
-proc `[]`*[T](arr: SlicedArray[T], ix: varargs[int]): var T =
-
-  var args = @ix  # varargs are not mutable
-
-  when compileOption("boundChecks"):
-    if len(args) != arr.ndim:
-      raise newException(IndexError, "SlicedArray index must match shape")
-
-  var flatix = arr.offset
-  for i in 0..(len(args)-1):
-    when compileOption("boundChecks"):
-      if args[i] >= arr.shape[i] or args[i] < -arr.shape[i]:
-        raise newException(IndexError, "SlicedArray index is out of bounds")
-    if args[i] < 0:
-      args[i] += arr.shape[i]
-    flatix += args[i] * arr.strides[i]
-
-  result = arr.data[flatix]
-
-
-proc `[]=`*[T](arr: SlicedArray[T], ix: varargs[int], rhs: T) =
+proc rawIx*[T](arr: SlicedArray[T], ix: var seq[int]): int {.inline.} =
 
   when compileOption("boundChecks"):
     if len(ix) != arr.ndim:
       raise newException(IndexError, "SlicedArray index must match shape")
 
-  var flatix = arr.offset
-  for i, v in ix:
+  result = arr.offset
+  for i in 0..<len(ix):
     when compileOption("boundChecks"):
-      if v >= arr.shape[i] or v < -arr.shape[i]:
+      if ix[i] >= arr.shape[i] or ix[i] < -arr.shape[i]:
         raise newException(IndexError, "SlicedArray index is out of bounds")
-    var temp = v
-    if v < 0:
-      temp += arr.shape[i]
-    flatix += temp * arr.strides[i]
+    if ix[i] < 0:
+      ix[i] += arr.shape[i]
+    result += ix[i] * arr.strides[i]
 
-  arr.data[flatix] = rhs
+
+proc `[]`*[T](arr: SlicedArray[T], ix: varargs[int]): var T =
+
+  var args = @ix
+  result = arr.data[arr.rawIx(args)]
+
+
+proc `[]=`*[T](arr: SlicedArray[T], ix: varargs[int], rhs: T) =
+
+  var args = @ix
+  arr.data[arr.rawIx(args)] = rhs
 
 
 type
@@ -404,20 +393,35 @@ proc `[]`*[T](arr: SlicedArray[T], ix: varargs[SteppedSlice]): SlicedArray[T] =
 
 iterator flat[T](arr: SlicedArray[T]): seq[int] =
 
-  var counters = newSeq[int](arr.ndim)
+  var ix = newSeq[int](arr.ndim)
   for dim in 0..<arr.ndim:
-    counters[dim]=0
+    ix[dim]=0
   for i in 0..<arr.size:
-    yield counters
+    yield ix
     for dim in countdown(arr.ndim-1,0):
-      counters[dim] += 1
-      if counters[dim] == arr.shape[dim]:
-        counters[dim] = 0
+      ix[dim] += 1
+      if ix[dim] == arr.shape[dim]:
+        ix[dim] = 0
       else:
         break
 
 
-macro generateBinaryOpSlicedArrayTScalarT(op, T, Tout: expr): stmt {.immediate.} =
+iterator flatraw[T](arr: SlicedArray[T]): int =
+
+  var ix = newSeq[int](arr.ndim)
+  for dim in 0..<arr.ndim:
+    ix[dim]=0
+  for i in 0..<arr.size:
+    yield arr.rawIx(ix)
+    for dim in countdown(arr.ndim-1,0):
+      ix[dim] += 1
+      if ix[dim] == arr.shape[dim]:
+        ix[dim] = 0
+      else:
+        break
+
+
+macro vectorizeBinOpArrTScalarT*(op, T, Tout: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -434,7 +438,7 @@ macro generateBinaryOpSlicedArrayTScalarT(op, T, Tout: expr): stmt {.immediate.}
   result = parseStmt(body)
 
 
-macro generateBinaryOpScalarTSlicedArrayT(op, T, Tout: expr): stmt {.immediate.} =
+macro vectorizeBinOpScalarTArrT*(op, T, Tout: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -451,7 +455,7 @@ macro generateBinaryOpScalarTSlicedArrayT(op, T, Tout: expr): stmt {.immediate.}
   result = parseStmt(body)
 
 
-macro generateBinaryOpSlicedArrayTSlicedArrayT(op, T, Tout: expr): stmt {.immediate.} =
+macro vectorizeBinOpArrTArrT*(op, T, Tout: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -471,7 +475,7 @@ macro generateBinaryOpSlicedArrayTSlicedArrayT(op, T, Tout: expr): stmt {.immedi
   result = parseStmt(body)
 
 
-macro generateBinaryOpSlicedArrayTScalarS(op, T, S, Tout: expr): stmt {.immediate.} =
+macro vectorizeBinOpArrTScalarS*(op, T, S, Tout: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -488,7 +492,7 @@ macro generateBinaryOpSlicedArrayTScalarS(op, T, S, Tout: expr): stmt {.immediat
   result = parseStmt(body)
 
 
-macro generateBinaryOpScalarSSlicedArrayT(op, S, T, Tout: expr): stmt {.immediate.} =
+macro vectorizeBinOpScalarSArrT*(op, S, T, Tout: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -505,7 +509,7 @@ macro generateBinaryOpScalarSSlicedArrayT(op, S, T, Tout: expr): stmt {.immediat
   result = parseStmt(body)
 
 
-macro generateBinaryOpSlicedArrayTSlicedArrayS(op, T, S, Tout: expr): stmt {.immediate.} =
+macro vectorizeBinOpArrTArrS*(op, T, S, Tout: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -525,7 +529,7 @@ macro generateBinaryOpSlicedArrayTSlicedArrayS(op, T, S, Tout: expr): stmt {.imm
   result = parseStmt(body)
 
 
-macro generateInplaceOpSlicedArrayTScalarT(op, T: expr): stmt {.immediate.} =
+macro vectorizeInplaceOpArrTScalarT*(op, T: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -541,7 +545,7 @@ macro generateInplaceOpSlicedArrayTScalarT(op, T: expr): stmt {.immediate.} =
   result = parseStmt(body)
 
 
-macro generateInplaceOpSlicedArrayTSlicedArrayT(op, T: expr): stmt {.immediate.} =
+macro vectorizeInplaceOpArrTArrT*(op, T: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -560,7 +564,7 @@ macro generateInplaceOpSlicedArrayTSlicedArrayT(op, T: expr): stmt {.immediate.}
   result = parseStmt(body)
 
 
-macro generateUnaryOpSlicedArrayT(op, T, Tout: expr): stmt {.immediate.} =
+macro vectorizeUnaryOpArrT*(op, T, Tout: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -577,87 +581,87 @@ macro generateUnaryOpSlicedArrayT(op, T, Tout: expr): stmt {.immediate.} =
   result = parseStmt(body)
 
 
-generateBinaryOpSlicedArrayTScalarT(`==`, T, bool)
-generateBinaryOpSlicedArrayTScalarT(`!=`, T, bool)
-generateBinaryOpSlicedArrayTScalarT(`<`, T, bool)
-generateBinaryOpSlicedArrayTScalarT(`<=`, T, bool)
-generateBinaryOpSlicedArrayTScalarT(`>`, T, bool)
-generateBinaryOpSlicedArrayTScalarT(`>=`, T, bool)
-generateBinaryOpSlicedArrayTScalarT(`+`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`-`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`*`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`/`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`==%`, T, bool)
-generateBinaryOpSlicedArrayTScalarT(`<%`, T, bool)
-generateBinaryOpSlicedArrayTScalarT(`<=%`, T, bool)
-generateBinaryOpSlicedArrayTScalarT(`>%`, T, bool)
-generateBinaryOpSlicedArrayTScalarT(`>=%`, T, bool)
-generateBinaryOpSlicedArrayTScalarT(`+%`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`-%`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`*%`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`/%`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`%%`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`div`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`mod`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`shr`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`shl`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`and`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`or`, T, T)
-generateBinaryOpSlicedArrayTScalarT(`xor`, T, T)
-generateBinaryOpSlicedArrayTScalarT(cmp, T, T)
-generateBinaryOpSlicedArrayTScalarT(`&`, string, string)
+vectorizeBinOpArrTScalarT(`==`, T, bool)
+vectorizeBinOpArrTScalarT(`!=`, T, bool)
+vectorizeBinOpArrTScalarT(`<`, T, bool)
+vectorizeBinOpArrTScalarT(`<=`, T, bool)
+vectorizeBinOpArrTScalarT(`>`, T, bool)
+vectorizeBinOpArrTScalarT(`>=`, T, bool)
+vectorizeBinOpArrTScalarT(`+`, T, T)
+vectorizeBinOpArrTScalarT(`-`, T, T)
+vectorizeBinOpArrTScalarT(`*`, T, T)
+vectorizeBinOpArrTScalarT(`/`, T, T)
+vectorizeBinOpArrTScalarT(`==%`, T, bool)
+vectorizeBinOpArrTScalarT(`<%`, T, bool)
+vectorizeBinOpArrTScalarT(`<=%`, T, bool)
+vectorizeBinOpArrTScalarT(`>%`, T, bool)
+vectorizeBinOpArrTScalarT(`>=%`, T, bool)
+vectorizeBinOpArrTScalarT(`+%`, T, T)
+vectorizeBinOpArrTScalarT(`-%`, T, T)
+vectorizeBinOpArrTScalarT(`*%`, T, T)
+vectorizeBinOpArrTScalarT(`/%`, T, T)
+vectorizeBinOpArrTScalarT(`%%`, T, T)
+vectorizeBinOpArrTScalarT(`div`, T, T)
+vectorizeBinOpArrTScalarT(`mod`, T, T)
+vectorizeBinOpArrTScalarT(`shr`, T, T)
+vectorizeBinOpArrTScalarT(`shl`, T, T)
+vectorizeBinOpArrTScalarT(`and`, T, T)
+vectorizeBinOpArrTScalarT(`or`, T, T)
+vectorizeBinOpArrTScalarT(`xor`, T, T)
+vectorizeBinOpArrTScalarT(cmp, T, T)
+vectorizeBinOpArrTScalarT(`&`, string, string)
 
-generateBinaryOpScalarTSlicedArrayT(`==`, T, bool)
-generateBinaryOpScalarTSlicedArrayT(`!=`, T, bool)
-generateBinaryOpScalarTSlicedArrayT(`<`, T, bool)
-generateBinaryOpScalarTSlicedArrayT(`<=`, T, bool)
-generateBinaryOpScalarTSlicedArrayT(`>`, T, bool)
-generateBinaryOpScalarTSlicedArrayT(`>=`, T, bool)
-generateBinaryOpScalarTSlicedArrayT(`+`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`-`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`*`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`/`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`==%`, T, bool)
-generateBinaryOpScalarTSlicedArrayT(`<%`, T, bool)
-generateBinaryOpScalarTSlicedArrayT(`<=%`, T, bool)
-generateBinaryOpScalarTSlicedArrayT(`>%`, T, bool)
-generateBinaryOpScalarTSlicedArrayT(`>=%`, T, bool)
-generateBinaryOpScalarTSlicedArrayT(`+%`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`-%`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`*%`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`/%`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`%%`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`div`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`mod`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`shr`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`shl`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`and`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`or`, T, T)
-generateBinaryOpScalarTSlicedArrayT(`xor`, T, T)
-generateBinaryOpScalarTSlicedArrayT(cmp, T, T)
-generateBinaryOpScalarTSlicedArrayT(`&`, string, string)
+vectorizeBinOpScalarTArrT(`==`, T, bool)
+vectorizeBinOpScalarTArrT(`!=`, T, bool)
+vectorizeBinOpScalarTArrT(`<`, T, bool)
+vectorizeBinOpScalarTArrT(`<=`, T, bool)
+vectorizeBinOpScalarTArrT(`>`, T, bool)
+vectorizeBinOpScalarTArrT(`>=`, T, bool)
+vectorizeBinOpScalarTArrT(`+`, T, T)
+vectorizeBinOpScalarTArrT(`-`, T, T)
+vectorizeBinOpScalarTArrT(`*`, T, T)
+vectorizeBinOpScalarTArrT(`/`, T, T)
+vectorizeBinOpScalarTArrT(`==%`, T, bool)
+vectorizeBinOpScalarTArrT(`<%`, T, bool)
+vectorizeBinOpScalarTArrT(`<=%`, T, bool)
+vectorizeBinOpScalarTArrT(`>%`, T, bool)
+vectorizeBinOpScalarTArrT(`>=%`, T, bool)
+vectorizeBinOpScalarTArrT(`+%`, T, T)
+vectorizeBinOpScalarTArrT(`-%`, T, T)
+vectorizeBinOpScalarTArrT(`*%`, T, T)
+vectorizeBinOpScalarTArrT(`/%`, T, T)
+vectorizeBinOpScalarTArrT(`%%`, T, T)
+vectorizeBinOpScalarTArrT(`div`, T, T)
+vectorizeBinOpScalarTArrT(`mod`, T, T)
+vectorizeBinOpScalarTArrT(`shr`, T, T)
+vectorizeBinOpScalarTArrT(`shl`, T, T)
+vectorizeBinOpScalarTArrT(`and`, T, T)
+vectorizeBinOpScalarTArrT(`or`, T, T)
+vectorizeBinOpScalarTArrT(`xor`, T, T)
+vectorizeBinOpScalarTArrT(cmp, T, T)
+vectorizeBinOpScalarTArrT(`&`, string, string)
 
-generateBinaryOpSlicedArrayTScalarS(`is`, T, S, bool)
-generateBinaryOpSlicedArrayTScalarS(`of`, T, S, bool)
+vectorizeBinOpArrTScalarS(`is`, T, S, bool)
+vectorizeBinOpArrTScalarS(`of`, T, S, bool)
 
-generateBinaryOpScalarSSlicedArrayT(`is`, S, T, bool)
-generateBinaryOpScalarSSlicedArrayT(`of`, S, T, bool)
+vectorizeBinOpScalarSArrT(`is`, S, T, bool)
+vectorizeBinOpScalarSArrT(`of`, S, T, bool)
 
-generateInplaceOpSlicedArrayTScalarT(add, string)
-generateInplaceOpSlicedArrayTScalarT(`+=`, T)
-generateInplaceOpSlicedArrayTScalarT(`-=`, T)
-generateInplaceOpSlicedArrayTScalarT(`*=`, T)
-generateInplaceOpSlicedArrayTScalarT(`/=`, T)
-generateInplaceOpSlicedArrayTScalarT(`&=`, string)
+vectorizeInplaceOpArrTScalarT(add, string)
+vectorizeInplaceOpArrTScalarT(`+=`, T)
+vectorizeInplaceOpArrTScalarT(`-=`, T)
+vectorizeInplaceOpArrTScalarT(`*=`, T)
+vectorizeInplaceOpArrTScalarT(`/=`, T)
+vectorizeInplaceOpArrTScalarT(`&=`, string)
 
-generateInplaceOpSlicedArrayTSlicedArrayT(add, string)
-generateInplaceOpSlicedArrayTSlicedArrayT(`+=`, T)
-generateInplaceOpSlicedArrayTSlicedArrayT(`-=`, T)
-generateInplaceOpSlicedArrayTSlicedArrayT(`*=`, T)
-generateInplaceOpSlicedArrayTSlicedArrayT(`/=`, T)
-generateInplaceOpSlicedArrayTSlicedArrayT(`&=`, string)
+vectorizeInplaceOpArrTArrT(add, string)
+vectorizeInplaceOpArrTArrT(`+=`, T)
+vectorizeInplaceOpArrTArrT(`-=`, T)
+vectorizeInplaceOpArrTArrT(`*=`, T)
+vectorizeInplaceOpArrTArrT(`/=`, T)
+vectorizeInplaceOpArrTArrT(`&=`, string)
 
-generateUnaryOpSlicedArrayT(`not`, T, T)
+vectorizeUnaryOpArrT(`not`, T, T)
 
 
 when isMainModule:
