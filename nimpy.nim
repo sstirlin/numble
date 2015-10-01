@@ -2,6 +2,7 @@ import strutils
 import macros
 import sequtils
 import unittest
+import typetraits
 
 
 {.experimental.}  # for automatic dereferencing
@@ -14,7 +15,7 @@ type
     shape*: seq[int]
     ndim*: int
     size*: int
-    stride*: seq[int]
+    strides*: seq[int]
     offset*: int
     data*: ptr seq[T]  # usually points to dataPrivate
     dataPrivate: seq[T]
@@ -30,10 +31,10 @@ proc initNilSlicedArray[T](shape: openarray[int]): SlicedArray[T] =
     if i < 1:
       raise newException(RangeError, "SlicedArray shape must be list of integers > 0")
 
-  result.stride = newSeq[int](result.ndim)
-  result.stride[result.ndim-1] = 1
+  result.strides = newSeq[int](result.ndim)
+  result.strides[result.ndim-1] = 1
   for i in countdown(result.ndim-1, 1):
-    result.stride[i-1] = result.stride[i]*shape[i]
+    result.strides[i-1] = result.strides[i]*shape[i]
 
   result.offset = 0
 
@@ -55,7 +56,7 @@ proc initSlicedArrayOnSeq*[T](shape: openarray[int], data: ptr seq[T]): SlicedAr
   result.data = data
 
 
-proc `[]`*[T](arr: SlicedArray[T], ix: varargs[int]): T =
+proc `[]`*[T](arr: SlicedArray[T], ix: varargs[int]): var T =
 
   var args = @ix  # varargs are not mutable
 
@@ -70,7 +71,7 @@ proc `[]`*[T](arr: SlicedArray[T], ix: varargs[int]): T =
         raise newException(IndexError, "SlicedArray index is out of bounds")
     if args[i] < 0:
       args[i] += arr.shape[i]
-    flatix += args[i] * arr.stride[i]
+    flatix += args[i] * arr.strides[i]
 
   result = arr.data[flatix]
 
@@ -89,7 +90,7 @@ proc `[]=`*[T](arr: SlicedArray[T], ix: varargs[int], rhs: T) =
     var temp = v
     if v < 0:
       temp += arr.shape[i]
-    flatix += temp * arr.stride[i]
+    flatix += temp * arr.strides[i]
 
   arr.data[flatix] = rhs
 
@@ -126,7 +127,6 @@ macro `[]`[T](arr: SlicedArray[T], e: string): expr =
             if len(ixs) == 0 or len(ixs) > 3:
                 error("SlicedArray slice index is invalid")
             elif len(ixs) == 1:
-                echo ixs[0]
                 code.add(ixs[0])
             elif len(ixs) > 1:
                 # convert from pythonic [,) to nimlike [,] intervals
@@ -154,7 +154,6 @@ macro `[]`[T](arr: SlicedArray[T], e: string): expr =
             code.add(",")
 
     code.add("]")
-    echo code
     parseExpr(code)
 
 
@@ -393,14 +392,272 @@ proc `[]`*[T](arr: SlicedArray[T], ix: varargs[SteppedSlice]): SlicedArray[T] =
 
     # set offset
     for i, v in args:
-        result.offset += v.a * result.stride[i]
+        result.offset += v.a * result.strides[i]
 
-    # set shape and stride    
+    # set shape and strides    
     result.size = 1
     for i, v in args:
-        result.stride[i] *= v.step
+        result.strides[i] *= v.step
         result.shape[i] = abs((v.b - v.a) div v.step) + 1
         result.size *= result.shape[i]
+
+
+iterator flat[T](arr: SlicedArray[T]): seq[int] =
+
+  var counters = newSeq[int](arr.ndim)
+  for dim in 0..<arr.ndim:
+    counters[dim]=0
+  for i in 0..<arr.size:
+    yield counters
+    for dim in countdown(arr.ndim-1,0):
+      counters[dim] += 1
+      if counters[dim] == arr.shape[dim]:
+        counters[dim] = 0
+      else:
+        break
+
+
+macro generateBinaryOpSlicedArrayTScalarT(op, T, Tout: expr): stmt {.immediate.} =
+
+  var opstr = "" 
+  if op.kind == nnkAccQuoted:
+    opstr = "`" & $(op[0]) & "`"
+  else:
+    opstr = $op
+  let body = """
+             proc $1*[$2](arr: SlicedArray[$2], s: $2): SlicedArray[$3] =
+
+               result = initSlicedArray[$3](arr.shape)
+               for ix in arr.flat:
+                 result[ix] = $1[$2](arr[ix], s) 
+             """ % [opstr, $T, $Tout]
+  result = parseStmt(body)
+
+
+macro generateBinaryOpScalarTSlicedArrayT(op, T, Tout: expr): stmt {.immediate.} =
+
+  var opstr = "" 
+  if op.kind == nnkAccQuoted:
+    opstr = "`" & $(op[0]) & "`"
+  else:
+    opstr = $op
+  let body = """
+             proc $1*[$2](s: $2, arr: SlicedArray[$2]): SlicedArray[$3] =
+
+               result = initSlicedArray[$3](arr.shape)
+               for ix in arr.flat:
+                 result[ix] = $1[$2](s, arr[ix]) 
+             """ % [opstr, $T, $Tout]
+  result = parseStmt(body)
+
+
+macro generateBinaryOpSlicedArrayTSlicedArrayT(op, T, Tout: expr): stmt {.immediate.} =
+
+  var opstr = "" 
+  if op.kind == nnkAccQuoted:
+    opstr = "`" & $(op[0]) & "`"
+  else:
+    opstr = $op
+  let body = """
+             proc $1*[$2](arr: SlicedArray[$2], s: SlicedArray[$2]): SlicedArray[$3] =
+
+               if arr.shape != s.shape:
+                 raise newException(RangeError, "SlicedArrays must have same shape")
+
+               result = initSlicedArray[$3](arr.shape)
+               for ix in arr.flat:
+                 result[ix] = $1[$2](arr[ix], s[ix]) 
+             """ % [opstr, $T, $Tout]
+  result = parseStmt(body)
+
+
+macro generateBinaryOpSlicedArrayTScalarS(op, T, S, Tout: expr): stmt {.immediate.} =
+
+  var opstr = "" 
+  if op.kind == nnkAccQuoted:
+    opstr = "`" & $(op[0]) & "`"
+  else:
+    opstr = $op
+  let body = """
+             proc $1*[$2, $3](arr: SlicedArray[$2], s: $3): SlicedArray[$4] =
+
+               result = initSlicedArray[$4](arr.shape)
+               for ix in arr.flat:
+                 result[ix] = $1[$2, $3](arr[ix], s) 
+             """ % [opstr, $T, $S, $Tout]
+  result = parseStmt(body)
+
+
+macro generateBinaryOpScalarSSlicedArrayT(op, S, T, Tout: expr): stmt {.immediate.} =
+
+  var opstr = "" 
+  if op.kind == nnkAccQuoted:
+    opstr = "`" & $(op[0]) & "`"
+  else:
+    opstr = $op
+  let body = """
+             proc $1*[$2, $3](s: $2, arr: SlicedArray[$3]): SlicedArray[$4] =
+
+               result = initSlicedArray[$4](arr.shape)
+               for ix in arr.flat:
+                 result[ix] = $1[$2, $3](s, arr[ix]) 
+             """ % [opstr, $S, $T, $Tout]
+  result = parseStmt(body)
+
+
+macro generateBinaryOpSlicedArrayTSlicedArrayS(op, T, S, Tout: expr): stmt {.immediate.} =
+
+  var opstr = "" 
+  if op.kind == nnkAccQuoted:
+    opstr = "`" & $(op[0]) & "`"
+  else:
+    opstr = $op
+  let body = """
+             proc $1*[$2, $3](arr: SlicedArray[$2], s: SlicedArray[$3]): SlicedArray[$4] =
+
+               if arr.shape != s.shape:
+                 raise newException(RangeError, "SlicedArrays must have same shape")
+
+               result = initSlicedArray[$4](arr.shape)
+               for ix in arr.flat:
+                 result[ix] = $1[$2, $3](arr[ix], s[ix]) 
+             """ % [opstr, $T, $S, $Tout]
+  result = parseStmt(body)
+
+
+macro generateInplaceOpSlicedArrayTScalarT(op, T: expr): stmt {.immediate.} =
+
+  var opstr = "" 
+  if op.kind == nnkAccQuoted:
+    opstr = "`" & $(op[0]) & "`"
+  else:
+    opstr = $op
+  let body = """
+             proc $1*[$2](arr: var SlicedArray[$2], s: $2) =
+
+               for ix in arr.flat:
+                 $1(arr[ix], s) 
+             """ % [opstr, $T]
+  result = parseStmt(body)
+
+
+macro generateInplaceOpSlicedArrayTSlicedArrayT(op, T: expr): stmt {.immediate.} =
+
+  var opstr = "" 
+  if op.kind == nnkAccQuoted:
+    opstr = "`" & $(op[0]) & "`"
+  else:
+    opstr = $op
+  let body = """
+             proc $1*[$2](arr: var SlicedArray[$2], s: SlicedArray[$2]) =
+
+               if arr.shape != s.shape:
+                 raise newException(RangeError, "SlicedArrays must have same shape")
+
+               for ix in arr.flat:
+                 $1(arr[ix], s[ix]) 
+             """ % [opstr, $T]
+  result = parseStmt(body)
+
+
+macro generateUnaryOpSlicedArrayT(op, T, Tout: expr): stmt {.immediate.} =
+
+  var opstr = "" 
+  if op.kind == nnkAccQuoted:
+    opstr = "`" & $(op[0]) & "`"
+  else:
+    opstr = $op
+  let body = """
+             proc $1*[$2](arr: SlicedArray[$2]): SlicedArray[$3] =
+
+               result = initSlicedArray[$3](arr.shape)
+               for ix in arr.flat:
+                 result[ix] = $1[$2](arr[ix]) 
+             """ % [opstr, $T, $Tout]
+  result = parseStmt(body)
+
+
+generateBinaryOpSlicedArrayTScalarT(`==`, T, bool)
+generateBinaryOpSlicedArrayTScalarT(`!=`, T, bool)
+generateBinaryOpSlicedArrayTScalarT(`<`, T, bool)
+generateBinaryOpSlicedArrayTScalarT(`<=`, T, bool)
+generateBinaryOpSlicedArrayTScalarT(`>`, T, bool)
+generateBinaryOpSlicedArrayTScalarT(`>=`, T, bool)
+generateBinaryOpSlicedArrayTScalarT(`+`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`-`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`*`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`/`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`==%`, T, bool)
+generateBinaryOpSlicedArrayTScalarT(`<%`, T, bool)
+generateBinaryOpSlicedArrayTScalarT(`<=%`, T, bool)
+generateBinaryOpSlicedArrayTScalarT(`>%`, T, bool)
+generateBinaryOpSlicedArrayTScalarT(`>=%`, T, bool)
+generateBinaryOpSlicedArrayTScalarT(`+%`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`-%`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`*%`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`/%`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`%%`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`div`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`mod`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`shr`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`shl`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`and`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`or`, T, T)
+generateBinaryOpSlicedArrayTScalarT(`xor`, T, T)
+generateBinaryOpSlicedArrayTScalarT(cmp, T, T)
+generateBinaryOpSlicedArrayTScalarT(`&`, string, string)
+
+generateBinaryOpScalarTSlicedArrayT(`==`, T, bool)
+generateBinaryOpScalarTSlicedArrayT(`!=`, T, bool)
+generateBinaryOpScalarTSlicedArrayT(`<`, T, bool)
+generateBinaryOpScalarTSlicedArrayT(`<=`, T, bool)
+generateBinaryOpScalarTSlicedArrayT(`>`, T, bool)
+generateBinaryOpScalarTSlicedArrayT(`>=`, T, bool)
+generateBinaryOpScalarTSlicedArrayT(`+`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`-`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`*`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`/`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`==%`, T, bool)
+generateBinaryOpScalarTSlicedArrayT(`<%`, T, bool)
+generateBinaryOpScalarTSlicedArrayT(`<=%`, T, bool)
+generateBinaryOpScalarTSlicedArrayT(`>%`, T, bool)
+generateBinaryOpScalarTSlicedArrayT(`>=%`, T, bool)
+generateBinaryOpScalarTSlicedArrayT(`+%`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`-%`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`*%`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`/%`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`%%`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`div`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`mod`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`shr`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`shl`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`and`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`or`, T, T)
+generateBinaryOpScalarTSlicedArrayT(`xor`, T, T)
+generateBinaryOpScalarTSlicedArrayT(cmp, T, T)
+generateBinaryOpScalarTSlicedArrayT(`&`, string, string)
+
+generateBinaryOpSlicedArrayTScalarS(`is`, T, S, bool)
+generateBinaryOpSlicedArrayTScalarS(`of`, T, S, bool)
+
+generateBinaryOpScalarSSlicedArrayT(`is`, S, T, bool)
+generateBinaryOpScalarSSlicedArrayT(`of`, S, T, bool)
+
+generateInplaceOpSlicedArrayTScalarT(add, string)
+generateInplaceOpSlicedArrayTScalarT(`+=`, T)
+generateInplaceOpSlicedArrayTScalarT(`-=`, T)
+generateInplaceOpSlicedArrayTScalarT(`*=`, T)
+generateInplaceOpSlicedArrayTScalarT(`/=`, T)
+generateInplaceOpSlicedArrayTScalarT(`&=`, string)
+
+generateInplaceOpSlicedArrayTSlicedArrayT(add, string)
+generateInplaceOpSlicedArrayTSlicedArrayT(`+=`, T)
+generateInplaceOpSlicedArrayTSlicedArrayT(`-=`, T)
+generateInplaceOpSlicedArrayTSlicedArrayT(`*=`, T)
+generateInplaceOpSlicedArrayTSlicedArrayT(`/=`, T)
+generateInplaceOpSlicedArrayTSlicedArrayT(`&=`, string)
+
+generateUnaryOpSlicedArrayT(`not`, T, T)
 
 
 when isMainModule:
@@ -429,11 +686,11 @@ when isMainModule:
 
   var arr = initSlicedArrayOnSeq([3,4,3], addr(raw))
 
-  test "Shape, size, ndim, stride, offset, data, are correct":
+  test "Shape, size, ndim, strides, offset, data, are correct":
     check arr.shape == @[3,4,3]
     check arr.size == 36
     check arr.ndim == 3
-    check arr.stride == @[12,3,1]
+    check arr.strides == @[12,3,1]
     check arr.offset == 0
     check arr.data == addr(raw)
   
@@ -549,11 +806,12 @@ when isMainModule:
 
 
   arr = arr[..|-1, ..|-1, ..|-1]
-  test "Check that fields of the shallow view are correct":
+
+  test "Shape, size, ndim, strides, offset, are correct":
     check arr.shape == @[3,4,3]
     check arr.size == 36
     check arr.ndim == 3
-    check arr.stride == @[-12,-3,-1]
+    check arr.strides == @[-12,-3,-1]
     check arr.offset == 35
 
   test "A view of a view works - let's reverse the last index again":
@@ -563,12 +821,12 @@ when isMainModule:
         for k in 0..2:
           check revarr[i,j,k] == (2-k) + 3*j + 12*i
 
-  test "Check that the fields of the shallow view were updated correctly":
+  test "Shape, size, ndim, strides, offset, are correct":
     var revarr = arr[..|1, ..|1, ..|-1]
     check revarr.shape == @[3,4,3]
     check revarr.size == 36
     check revarr.ndim == 3
-    check revarr.stride == @[-12,-3,1]
+    check revarr.strides == @[-12,-3,1]
     check revarr.offset == 33
   
   test "Shallow views can have stepsizes other than 1":
@@ -578,12 +836,12 @@ when isMainModule:
         for k in 0..2:
           check subarr[i,j,k] == k + 3*j + 12*2*i
 
-  test "Check that the fields of the shallow view were updated correctly":
+  test "Shape, size, ndim, strides, offset, are correct":
     var subarr = arr[..|2, ..|1, ..|1]
     check subarr.shape == @[2,4,3]
     check subarr.size == 24 
     check subarr.ndim == 3
-    check subarr.stride == @[-24,-3,-1]
+    check subarr.strides == @[-24,-3,-1]
     check subarr.offset == 35
 
   test "We can have sub-subviews":
@@ -594,10 +852,60 @@ when isMainModule:
         for k in 0..2:
           check subsubarr[i,j,k] == k + 3*2*j + 12*2*i
     
-  test "Check that the fields of the shallow view were updated correctly":
+  test "Shape, size, ndim, strides, offset, are correct":
     var subarr = arr[..|2, ..|2, ..|1]
     check subarr.shape == @[2,2,3]
     check subarr.size == 12 
     check subarr.ndim == 3
-    check subarr.stride == @[-24,-6,-1]
+    check subarr.strides == @[-24,-6,-1]
     check subarr.offset == 35
+
+#  echo (arr < 5).data
+#  for i in arr.flat:
+#    echo i
+  var boolmask = arr == 5
+  echo boolmask.data
+  boolmask = arr <= 5
+  echo boolmask.data
+  boolmask = arr < 5
+  echo boolmask.data
+  boolmask = arr >= 5
+  echo boolmask.data
+  boolmask = arr > 5
+  echo boolmask.data
+
+  boolmask = 5 == arr
+  echo boolmask.data
+  boolmask = 5 <= arr
+  echo boolmask.data
+  boolmask = 5 < arr
+  echo boolmask.data
+  boolmask = 5 >= arr
+  echo boolmask.data
+  boolmask = 5 > arr
+  echo boolmask.data
+
+  var intmask = not arr
+  echo intmask.data
+
+  arr += 1
+  echo arr
+  arr -= 1
+  echo arr
+
+
+  var arr1 = initSlicedArray[string]([3])
+  arr1[0] = "zed"
+  arr1[1] = "blah"
+  arr1[2] = "phrrt"
+  arr1.add("haha")
+  arr1 &= "blech"
+  echo arr1.data
+
+  var arr2 = initSlicedArray[string]([3])
+  arr2[0] = "dez"
+  arr2[1] = "halb"
+  arr2[2] = "trrhp"
+  arr1 &= arr2
+  arr1.add(arr2)
+  echo arr1.data
