@@ -1,4 +1,5 @@
 import strutils
+import math
 import macros
 import sequtils
 import unittest
@@ -17,8 +18,7 @@ type
     size*: int
     strides*: seq[int]
     offset*: int
-    data*: ptr seq[T]  # usually points to dataPrivate
-    dataPrivate: seq[T]
+    data*: seq[T]
 
 
 proc initNilSlicedArray[T](shape: openarray[int]): SlicedArray[T] =
@@ -42,46 +42,72 @@ proc initNilSlicedArray[T](shape: openarray[int]): SlicedArray[T] =
 proc initSlicedArray*[T](shape: openarray[int]): SlicedArray[T] =
 
     result = initNilSlicedArray[T](shape)
-    result.dataPrivate = newSeq[T](result.size)
-    shallow(result.dataPrivate)  # only allow shallow copies
-    result.data = addr(result.dataPrivate)
+    result.data = newSeq[T](result.size)
 
 
-proc initSlicedArrayOnSeq*[T](shape: openarray[int], data: ptr seq[T]): SlicedArray[T] =
+proc initSlicedArrayOnSeq*[T](shape: openarray[int], data: seq[T]): SlicedArray[T] =
 
   result = initNilSlicedArray[T](shape)
   if result.size > len(data):
     raise newException(RangeError, "SlicedArray shape is larger than provided buffer")
 
-  result.data = data
+  shallowCopy(result.data, data)
 
 
-proc rawIx*[T](arr: SlicedArray[T], ix: var seq[int]): int {.inline.} =
+proc rawIx*[T](arr: SlicedArray[T], ix: seq[int]): int {.inline.} =
+
+  var args = ix # mutable copy
 
   when compileOption("boundChecks"):
-    if len(ix) != arr.ndim:
+    if len(args) != arr.ndim:
       raise newException(IndexError, "SlicedArray index must match shape")
 
   result = arr.offset
-  for i in 0..<len(ix):
+  for i in 0.. <len(args):
     when compileOption("boundChecks"):
-      if ix[i] >= arr.shape[i] or ix[i] < -arr.shape[i]:
+      if args[i] >= arr.shape[i] or args[i] < -arr.shape[i]:
         raise newException(IndexError, "SlicedArray index is out of bounds")
-    if ix[i] < 0:
-      ix[i] += arr.shape[i]
-    result += ix[i] * arr.strides[i]
+    if args[i] < 0:
+      args[i] += arr.shape[i]
+    result += args[i] * arr.strides[i]
 
 
-proc `[]`*[T](arr: SlicedArray[T], ix: varargs[int]): var T =
+proc rawIx*[T](arr: SlicedArray[T], ix: varargs[int]): int {.inline.} =
 
-  var args = @ix
-  result = arr.data[arr.rawIx(args)]
+  var args = @ix # mutable copy
+
+  when compileOption("boundChecks"):
+    if len(args) != arr.ndim:
+      raise newException(IndexError, "SlicedArray index must match shape")
+
+  result = arr.offset
+  for i in 0.. <len(args):
+    when compileOption("boundChecks"):
+      if args[i] >= arr.shape[i] or args[i] < -arr.shape[i]:
+        raise newException(IndexError, "SlicedArray index is out of bounds")
+    if args[i] < 0:
+      args[i] += arr.shape[i]
+    result += args[i] * arr.strides[i]
 
 
-proc `[]=`*[T](arr: SlicedArray[T], ix: varargs[int], rhs: T) =
+template `[]`*[T](arr: SlicedArray[T], ix: varargs[int]): expr =
 
-  var args = @ix
-  arr.data[arr.rawIx(args)] = rhs
+  arr.data[arr.rawIx(ix)]
+
+
+template `[]`*[T](arr: SlicedArray[T], ix: seq[int]): expr =
+
+  arr.data[arr.rawIx(ix)]
+
+
+proc `[]=`*[T](arr: var SlicedArray[T], ix: varargs[int], rhs: T) =
+
+  arr.data[arr.rawIx(ix)] = rhs
+
+
+proc `[]=`*[T](arr: var SlicedArray[T], ix: seq[int], rhs: T) =
+
+  arr.data[arr.rawIx(ix)] = rhs
 
 
 type
@@ -94,10 +120,10 @@ type
 
 proc initSteppedSlice*(a, b, step: int, incEnd: bool): SteppedSlice =
 
-    result.a = a
-    result.b = b
-    result.step = step
-    result.incEnd = incEnd
+  result.a = a
+  result.b = b
+  result.step = step
+  result.incEnd = incEnd
 
 
 const _ = high(int)
@@ -105,213 +131,213 @@ const _ = high(int)
 
 macro `[]`[T](arr: SlicedArray[T], e: string): expr =
 
-    var args = split(e.strVal, ",")
-    var code = $arr & "["
+  var args = split(e.strVal, ",")
+  var code = $arr & "["
 
-    for i in 0.. <len(args):
-        if strip(args[i]) == "...":
-            code.add("fill")
+  for i in 0.. <len(args):
+    if strip(args[i]) == "...":
+      code.add("fill")
+    else:
+      var ixs = split(strip(args[i]), ":")
+      if len(ixs) == 0 or len(ixs) > 3:
+        error("SlicedArray slice index is invalid")
+      elif len(ixs) == 1:
+        code.add(ixs[0])
+      elif len(ixs) > 1:
+        # convert from pythonic [,) to nimlike [,] intervals
+        if strip(ixs[0]) == "":
+          ixs[0] = $_
+        if strip(ixs[1]) == "":
+          ixs[1] = $_
+        if len(ixs) == 3: # see if we should step other than default
+          if strip(ixs[2]) == "":
+            ixs[2] = "1"
         else:
-            var ixs = split(strip(args[i]), ":")
-            if len(ixs) == 0 or len(ixs) > 3:
-                error("SlicedArray slice index is invalid")
-            elif len(ixs) == 1:
-                code.add(ixs[0])
-            elif len(ixs) > 1:
-                # convert from pythonic [,) to nimlike [,] intervals
-                if strip(ixs[0]) == "":
-                    ixs[0] = $_
-                if strip(ixs[1]) == "":
-                    ixs[1] = $_
-                if len(ixs) == 3: # see if we should step other than default
-                    if strip(ixs[2]) == "":
-                        ixs[2] = "1"
-                else:
-                    ixs.add("1")
-                code.add("int(")
-                code.add(ixs[0])
-                code.add(")")
-                code.add("...")
-                code.add("int(")
-                code.add(ixs[1])
-                code.add(")")
-                code.add("|")
-                code.add("int(")
-                code.add(ixs[2])
-                code.add(")")
-        if i != len(args)-1:
-            code.add(",")
+          ixs.add("1")
+        code.add("int(")
+        code.add(ixs[0])
+        code.add(")")
+        code.add("...")
+        code.add("int(")
+        code.add(ixs[1])
+        code.add(")")
+        code.add("|")
+        code.add("int(")
+        code.add(ixs[2])
+        code.add(")")
+    if i != len(args)-1:
+      code.add(",")
 
-    code.add("]")
-    parseExpr(code)
+  code.add("]")
+  parseExpr(code)
 
 
 proc `..`*(a: int, b: int): SteppedSlice =
 
-    result.a = a
-    result.b = b
-    result.step = 1
-    result.incEnd = true
+  result.a = a
+  result.b = b
+  result.step = 1
+  result.incEnd = true
 
 
 proc `..-`*(a: int, b: int): SteppedSlice =
 
-    result.a = a
-    result.b = -b
-    result.step = 1
-    result.incEnd = true
+  result.a = a
+  result.b = -b
+  result.step = 1
+  result.incEnd = true
 
 
 proc `..+`*(a: int, b: int): SteppedSlice =
 
-    result.a = a
-    result.b = b
-    result.step = 1
-    result.incEnd = true
+  result.a = a
+  result.b = b
+  result.step = 1
+  result.incEnd = true
 
 
 proc `..`*(a: int, s: SteppedSlice): SteppedSlice =
 
-    result.a = a
-    result.b = s.b
-    result.step = s.step
-    result.incEnd = true
+  result.a = a
+  result.b = s.b
+  result.step = s.step
+  result.incEnd = true
 
 
 proc `..-`*(a: int, s: SteppedSlice): SteppedSlice =
 
-    result.a = a
-    result.b = -s.b
-    result.step = s.step
-    result.incEnd = true
+  result.a = a
+  result.b = -s.b
+  result.step = s.step
+  result.incEnd = true
 
 
 proc `..+`*(a: int, s: SteppedSlice): SteppedSlice =
 
-    result.a = a
-    result.b = s.b
-    result.step = s.step
-    result.incEnd = true
+  result.a = a
+  result.b = s.b
+  result.step = s.step
+  result.incEnd = true
 
 
 proc `...`*(a: int, b: int): SteppedSlice =
 
-    result.a = a
-    result.b = b
-    result.step = 1
-    result.incEnd = false
+  result.a = a
+  result.b = b
+  result.step = 1
+  result.incEnd = false
 
 
 proc `...-`*(a: int, b: int): SteppedSlice =
 
-    result.a = a
-    result.b = -b
-    result.step = 1
-    result.incEnd = false
+  result.a = a
+  result.b = -b
+  result.step = 1
+  result.incEnd = false
 
 
 proc `...+`*(a: int, b: int): SteppedSlice =
 
-    result.a = a
-    result.b = b
-    result.step = 1
-    result.incEnd = false
+  result.a = a
+  result.b = b
+  result.step = 1
+  result.incEnd = false
 
 
 proc `...`*(a: int, s: SteppedSlice): SteppedSlice =
 
-    result.a = a
-    result.b = s.b
-    result.step = s.step
-    result.incEnd = false
+  result.a = a
+  result.b = s.b
+  result.step = s.step
+  result.incEnd = false
 
 
 proc `...-`*(a: int, s: SteppedSlice): SteppedSlice =
 
-    result.a = a
-    result.b = -s.b
-    result.step = s.step
-    result.incEnd = false
+  result.a = a
+  result.b = -s.b
+  result.step = s.step
+  result.incEnd = false
 
 
 proc `...+`*(a: int, s: SteppedSlice): SteppedSlice =
 
-    result.a = a
-    result.b = s.b
-    result.step = s.step
-    result.incEnd = false
+  result.a = a
+  result.b = s.b
+  result.step = s.step
+  result.incEnd = false
 
 
 proc `|`*(b: int, step: int): SteppedSlice =
 
-    result.a = 0
-    result.b = b
-    result.step = step
-    result.incEnd = true
+  result.a = 0
+  result.b = b
+  result.step = step
+  result.incEnd = true
 
 
 proc `|-`*(b: int, step: int): SteppedSlice =
 
-    result.a = 0
-    result.b = b
-    result.step = -step
-    result.incEnd = true
+  result.a = 0
+  result.b = b
+  result.step = -step
+  result.incEnd = true
 
 
 proc `|+`*(b: int, step: int): SteppedSlice =
 
-    result.a = 0
-    result.b = b
-    result.step = step
-    result.incEnd = true
+  result.a = 0
+  result.b = b
+  result.step = step
+  result.incEnd = true
 
 
 proc `|`*(s: SteppedSlice, step: int): SteppedSlice =
 
-    result.a = s.a
-    result.b = s.b
-    result.step = step
-    result.incEnd = s.incEnd
+  result.a = s.a
+  result.b = s.b
+  result.step = step
+  result.incEnd = s.incEnd
 
 
 proc `|-`*(s: SteppedSlice, step: int): SteppedSlice =
 
-    result.a = s.a
-    result.b = s.b
-    result.step = -step
-    result.incEnd = s.incEnd
+  result.a = s.a
+  result.b = s.b
+  result.step = -step
+  result.incEnd = s.incEnd
 
 
 proc `|+`*(s: SteppedSlice, step: int): SteppedSlice =
 
-    result.a = s.a
-    result.b = s.b
-    result.step = step
-    result.incEnd = s.incEnd
+  result.a = s.a
+  result.b = s.b
+  result.step = step
+  result.incEnd = s.incEnd
 
 
 proc `..|`*(step: int): SteppedSlice =
 
-    result.a = _
-    result.b = _
-    result.step = step
-    result.incEnd = true
+  result.a = _
+  result.b = _
+  result.step = step
+  result.incEnd = true
 
 
 proc `..|-`*(step: int): SteppedSlice =
 
-    result.a = _
-    result.b = _
-    result.step = -step
-    result.incEnd = true
+  result.a = _
+  result.b = _
+  result.step = -step
+  result.incEnd = true
 
 
 proc `..|+`*(step: int): SteppedSlice =
 
-    result.a = _
-    result.b = _
-    result.step = step
-    result.incEnd = true
+  result.a = _
+  result.b = _
+  result.step = step
+  result.incEnd = true
 
 
 let fill = initSteppedSlice(0,0,0,true)
@@ -319,84 +345,89 @@ let fill = initSteppedSlice(0,0,0,true)
 
 proc `[]`*[T](arr: SlicedArray[T], ix: varargs[SteppedSlice]): SlicedArray[T] =
 
-    var args = newSeq[SteppedSlice](0)
-    
-    # If 'fill' specified in front or back then expand it
-    if ix[0] == fill:
-        for i in 1..(len(ix)-1):
-            if ix[i] == fill:
-                raise newException(IndexError, "'fill' is only allowed either at the front or back of an SlicedArray, and never at the same time")
-        for i in 1..(arr.ndim-(len(ix)-1)):
-            args.add(..|1)
-        for i in 1..(len(ix)-1):
-            args.add(ix[i])
-    elif ix[len(ix)-1] == fill:
-        for i in 0..(len(ix)-2):
-            if ix[i] == fill:
-                raise newException(IndexError, "'fill' is only allowed either at the front or back of an SlicedArray, and never at the same time")
-        for i in 0..(len(ix)-2):
-            args.add(ix[i])
-        for i in 1..(arr.ndim-(len(ix)-1)):
-            args.add(..|1)
+  var args = newSeq[SteppedSlice](0)
+  
+  # If 'fill' specified in front or back then expand it
+  if ix[0] == fill:
+    for i in 1..(len(ix)-1):
+      if ix[i] == fill:
+        raise newException(IndexError, "'fill' is only allowed either at the front or back of an SlicedArray, and never at the same time")
+    for i in 1..(arr.ndim-(len(ix)-1)):
+      args.add(..|1)
+    for i in 1..(len(ix)-1):
+      args.add(ix[i])
+  elif ix[len(ix)-1] == fill:
+    for i in 0..(len(ix)-2):
+      if ix[i] == fill:
+        raise newException(IndexError, "'fill' is only allowed either at the front or back of an SlicedArray, and never at the same time")
+    for i in 0..(len(ix)-2):
+      args.add(ix[i])
+    for i in 1..(arr.ndim-(len(ix)-1)):
+      args.add(..|1)
+  else:
+    for i in 0..(len(ix)-1):
+      args.add(ix[i])
+
+  if len(args) != arr.ndim:
+    raise newException(IndexError, "new SlicedArray must have same shape as original")
+
+  result.shape = arr.shape
+  result.ndim = arr.ndim
+  result.size = arr.size
+  result.strides = arr.strides
+  result.offset = arr.offset
+  shallowCopy(result.data, arr.data)
+
+  # first check that ranges make sense
+  for i in 0..(len(args)-1):
+      
+    if args[i].step < 0:
+      if args[i].b == _:
+        args[i].b = 0
+      else:
+        if not args[i].incEnd:
+          args[i].b += 1
+      if args[i].a == _:
+        args[i].a = arr.shape[i]-1 
     else:
-        for i in 0..(len(ix)-1):
-            args.add(ix[i])
+      if args[i].b == _:
+        args[i].b = arr.shape[i]-1 
+      else:
+        if not args[i].incEnd:
+          args[i].b -= 1
+      if args[i].a == _:
+        args[i].a = 0
 
-    if len(args) != arr.ndim:
-        raise newException(IndexError, "new SlicedArray must have same shape as original")
+    if args[i].a >= arr.shape[i] or args[i].a < -arr.shape[i]:
+      raise newException(IndexError, "SlicedArray index is out of bounds")
+    if args[i].b >= arr.shape[i] or args[i].b < -arr.shape[i]:
+      raise newException(IndexError, "SlicedArray index is out of bounds")
+    if args[i].a < 0:
+      args[i].a += arr.shape[i]
+    if args[i].b < 0:
+      args[i].b += arr.shape[i]
+    args[i].b -= (args[i].b - args[i].a) mod args[i].step  # make array bounds evenly divisible by stepsize
+    if (args[i].b - args[i].a) div args[i].step < 0:
+      raise newException(IndexError, "SlicedArray must have range in same direction as step")
 
-    result = arr
+  # set offset
+  for i, v in args:
+    result.offset += v.a * result.strides[i]
 
-    # first check that ranges make sense
-    for i in 0..(len(args)-1):
-        
-        if args[i].step < 0:
-            if args[i].b == _:
-                args[i].b = 0
-            else:
-                if not args[i].incEnd:
-                    args[i].b += 1
-            if args[i].a == _:
-                args[i].a = arr.shape[i]-1 
-        else:
-            if args[i].b == _:
-                args[i].b = arr.shape[i]-1 
-            else:
-                if not args[i].incEnd:
-                    args[i].b -= 1
-            if args[i].a == _:
-                args[i].a = 0
-
-        if args[i].a >= arr.shape[i] or args[i].a < -arr.shape[i]:
-                raise newException(IndexError, "SlicedArray index is out of bounds")
-        if args[i].b >= arr.shape[i] or args[i].b < -arr.shape[i]:
-                raise newException(IndexError, "SlicedArray index is out of bounds")
-        if args[i].a < 0:
-            args[i].a += arr.shape[i]
-        if args[i].b < 0:
-            args[i].b += arr.shape[i]
-        args[i].b -= (args[i].b - args[i].a) mod args[i].step  # make array bounds evenly divisible by stepsize
-        if (args[i].b - args[i].a) div args[i].step < 0:
-            raise newException(IndexError, "SlicedArray must have range in same direction as step")
-
-    # set offset
-    for i, v in args:
-        result.offset += v.a * result.strides[i]
-
-    # set shape and strides    
-    result.size = 1
-    for i, v in args:
-        result.strides[i] *= v.step
-        result.shape[i] = abs((v.b - v.a) div v.step) + 1
-        result.size *= result.shape[i]
+  # set shape and strides    
+  result.size = 1
+  for i, v in args:
+    result.strides[i] *= v.step
+    result.shape[i] = abs((v.b - v.a) div v.step) + 1
+    result.size *= result.shape[i]
 
 
 iterator flat[T](arr: SlicedArray[T]): seq[int] =
 
   var ix = newSeq[int](arr.ndim)
-  for dim in 0..<arr.ndim:
+  for dim in 0.. <arr.ndim:
     ix[dim]=0
-  for i in 0..<arr.size:
+  for i in 0.. <arr.size:
     yield ix
     for dim in countdown(arr.ndim-1,0):
       ix[dim] += 1
@@ -409,9 +440,9 @@ iterator flat[T](arr: SlicedArray[T]): seq[int] =
 iterator flatraw[T](arr: SlicedArray[T]): int =
 
   var ix = newSeq[int](arr.ndim)
-  for dim in 0..<arr.ndim:
+  for dim in 0.. <arr.ndim:
     ix[dim]=0
-  for i in 0..<arr.size:
+  for i in 0.. <arr.size:
     yield arr.rawIx(ix)
     for dim in countdown(arr.ndim-1,0):
       ix[dim] += 1
@@ -421,7 +452,7 @@ iterator flatraw[T](arr: SlicedArray[T]): int =
         break
 
 
-macro vectorizeBinOpArrTScalarT*(op, T, Tout: expr): stmt {.immediate.} =
+macro vectorizeBinOpArrScalarT*(op, T, Tout: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -438,7 +469,7 @@ macro vectorizeBinOpArrTScalarT*(op, T, Tout: expr): stmt {.immediate.} =
   result = parseStmt(body)
 
 
-macro vectorizeBinOpScalarTArrT*(op, T, Tout: expr): stmt {.immediate.} =
+macro vectorizeBinOpScalarArrT*(op, T, Tout: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -455,7 +486,7 @@ macro vectorizeBinOpScalarTArrT*(op, T, Tout: expr): stmt {.immediate.} =
   result = parseStmt(body)
 
 
-macro vectorizeBinOpArrTArrT*(op, T, Tout: expr): stmt {.immediate.} =
+macro vectorizeBinOpArrArrT*(op, T, Tout: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -473,6 +504,13 @@ macro vectorizeBinOpArrTArrT*(op, T, Tout: expr): stmt {.immediate.} =
                  result[ix] = $1[$2](arr[ix], s[ix]) 
              """ % [opstr, $T, $Tout]
   result = parseStmt(body)
+
+
+template vectorizeBinOpT*(op, T, Tout: expr): stmt {.immediate.} =
+
+  vectorizeBinOpArrScalarT(op, T, Tout)
+  vectorizeBinOpScalarArrT(op, T, Tout)
+  vectorizeBinOpArrArrT(op, T, Tout)
 
 
 macro vectorizeBinOpArrTScalarS*(op, T, S, Tout: expr): stmt {.immediate.} =
@@ -529,7 +567,14 @@ macro vectorizeBinOpArrTArrS*(op, T, S, Tout: expr): stmt {.immediate.} =
   result = parseStmt(body)
 
 
-macro vectorizeInplaceOpArrTScalarT*(op, T: expr): stmt {.immediate.} =
+template vectorizeBinOpTS*(op, T, S, Tout: expr): stmt {.immediate.} =
+
+  vectorizeBinOpArrTScalarS(op, T, S, Tout)
+  vectorizeBinOpScalarSArrT(op, S, T, Tout)
+  vectorizeBinOpArrTArrS(op, T, S, Tout)
+
+
+macro vectorizeInplaceOpArrScalarT*(op, T: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -545,7 +590,7 @@ macro vectorizeInplaceOpArrTScalarT*(op, T: expr): stmt {.immediate.} =
   result = parseStmt(body)
 
 
-macro vectorizeInplaceOpArrTArrT*(op, T: expr): stmt {.immediate.} =
+macro vectorizeInplaceOpArrArrT*(op, T: expr): stmt {.immediate.} =
 
   var opstr = "" 
   if op.kind == nnkAccQuoted:
@@ -562,6 +607,12 @@ macro vectorizeInplaceOpArrTArrT*(op, T: expr): stmt {.immediate.} =
                  $1(arr[ix], s[ix]) 
              """ % [opstr, $T]
   result = parseStmt(body)
+
+
+template vectorizeInplaceOpT*(op, T: expr): stmt {.immediate.} =
+
+  vectorizeInplaceOpArrScalarT(op, T)
+  vectorizeInplaceOpArrArrT(op, T)
 
 
 macro vectorizeUnaryOpArrT*(op, T, Tout: expr): stmt {.immediate.} =
@@ -581,87 +632,77 @@ macro vectorizeUnaryOpArrT*(op, T, Tout: expr): stmt {.immediate.} =
   result = parseStmt(body)
 
 
-vectorizeBinOpArrTScalarT(`==`, T, bool)
-vectorizeBinOpArrTScalarT(`!=`, T, bool)
-vectorizeBinOpArrTScalarT(`<`, T, bool)
-vectorizeBinOpArrTScalarT(`<=`, T, bool)
-vectorizeBinOpArrTScalarT(`>`, T, bool)
-vectorizeBinOpArrTScalarT(`>=`, T, bool)
-vectorizeBinOpArrTScalarT(`+`, T, T)
-vectorizeBinOpArrTScalarT(`-`, T, T)
-vectorizeBinOpArrTScalarT(`*`, T, T)
-vectorizeBinOpArrTScalarT(`/`, T, T)
-vectorizeBinOpArrTScalarT(`==%`, T, bool)
-vectorizeBinOpArrTScalarT(`<%`, T, bool)
-vectorizeBinOpArrTScalarT(`<=%`, T, bool)
-vectorizeBinOpArrTScalarT(`>%`, T, bool)
-vectorizeBinOpArrTScalarT(`>=%`, T, bool)
-vectorizeBinOpArrTScalarT(`+%`, T, T)
-vectorizeBinOpArrTScalarT(`-%`, T, T)
-vectorizeBinOpArrTScalarT(`*%`, T, T)
-vectorizeBinOpArrTScalarT(`/%`, T, T)
-vectorizeBinOpArrTScalarT(`%%`, T, T)
-vectorizeBinOpArrTScalarT(`div`, T, T)
-vectorizeBinOpArrTScalarT(`mod`, T, T)
-vectorizeBinOpArrTScalarT(`shr`, T, T)
-vectorizeBinOpArrTScalarT(`shl`, T, T)
-vectorizeBinOpArrTScalarT(`and`, T, T)
-vectorizeBinOpArrTScalarT(`or`, T, T)
-vectorizeBinOpArrTScalarT(`xor`, T, T)
-vectorizeBinOpArrTScalarT(cmp, T, T)
-vectorizeBinOpArrTScalarT(`&`, string, string)
+vectorizeBinOpT(`==`, T, bool)
+vectorizeBinOpT(`!=`, T, bool)
+vectorizeBinOpT(`<`, T, bool)
+vectorizeBinOpT(`<=`, T, bool)
+vectorizeBinOpT(`>`, T, bool)
+vectorizeBinOpT(`>=`, T, bool)
+vectorizeBinOpT(`+`, T, T)
+vectorizeBinOpT(`-`, T, T)
+vectorizeBinOpT(`*`, T, T)
+vectorizeBinOpT(`/`, T, T)
+vectorizeBinOpT(`==%`, T, bool)
+vectorizeBinOpT(`<%`, T, bool)
+vectorizeBinOpT(`<=%`, T, bool)
+vectorizeBinOpT(`>%`, T, bool)
+vectorizeBinOpT(`>=%`, T, bool)
+vectorizeBinOpT(`+%`, T, T)
+vectorizeBinOpT(`-%`, T, T)
+vectorizeBinOpT(`*%`, T, T)
+vectorizeBinOpT(`/%`, T, T)
+vectorizeBinOpT(`%%`, T, T)
+vectorizeBinOpT(`div`, T, T)
+vectorizeBinOpT(`mod`, T, T)
+vectorizeBinOpT(`shr`, T, T)
+vectorizeBinOpT(`shl`, T, T)
+vectorizeBinOpT(`and`, T, T)
+vectorizeBinOpT(`or`, T, T)
+vectorizeBinOpT(`xor`, T, T)
+vectorizeBinOpT(cmp, T, T)
+vectorizeBinOpT(`&`, string, string)
+vectorizeBinOpT(binom, int, int)
+vectorizeBinOpT(arctan2, float, float)
+vectorizeBinOpT(hypot, float, float)
+vectorizeBinOpT(pow, float, float)
+vectorizeBinOpT(fmod, float, float)
+vectorizeBinOpT(`^`, T, T)
+vectorizeBinOpT(gcd, T, T)
+vectorizeBinOpT(lcm, T, T)
 
-vectorizeBinOpScalarTArrT(`==`, T, bool)
-vectorizeBinOpScalarTArrT(`!=`, T, bool)
-vectorizeBinOpScalarTArrT(`<`, T, bool)
-vectorizeBinOpScalarTArrT(`<=`, T, bool)
-vectorizeBinOpScalarTArrT(`>`, T, bool)
-vectorizeBinOpScalarTArrT(`>=`, T, bool)
-vectorizeBinOpScalarTArrT(`+`, T, T)
-vectorizeBinOpScalarTArrT(`-`, T, T)
-vectorizeBinOpScalarTArrT(`*`, T, T)
-vectorizeBinOpScalarTArrT(`/`, T, T)
-vectorizeBinOpScalarTArrT(`==%`, T, bool)
-vectorizeBinOpScalarTArrT(`<%`, T, bool)
-vectorizeBinOpScalarTArrT(`<=%`, T, bool)
-vectorizeBinOpScalarTArrT(`>%`, T, bool)
-vectorizeBinOpScalarTArrT(`>=%`, T, bool)
-vectorizeBinOpScalarTArrT(`+%`, T, T)
-vectorizeBinOpScalarTArrT(`-%`, T, T)
-vectorizeBinOpScalarTArrT(`*%`, T, T)
-vectorizeBinOpScalarTArrT(`/%`, T, T)
-vectorizeBinOpScalarTArrT(`%%`, T, T)
-vectorizeBinOpScalarTArrT(`div`, T, T)
-vectorizeBinOpScalarTArrT(`mod`, T, T)
-vectorizeBinOpScalarTArrT(`shr`, T, T)
-vectorizeBinOpScalarTArrT(`shl`, T, T)
-vectorizeBinOpScalarTArrT(`and`, T, T)
-vectorizeBinOpScalarTArrT(`or`, T, T)
-vectorizeBinOpScalarTArrT(`xor`, T, T)
-vectorizeBinOpScalarTArrT(cmp, T, T)
-vectorizeBinOpScalarTArrT(`&`, string, string)
 
-vectorizeBinOpArrTScalarS(`is`, T, S, bool)
-vectorizeBinOpArrTScalarS(`of`, T, S, bool)
+vectorizeBinOpTS(`is`, T, S, bool)
+vectorizeBinOpTS(`of`, T, S, bool)
 
-vectorizeBinOpScalarSArrT(`is`, S, T, bool)
-vectorizeBinOpScalarSArrT(`of`, S, T, bool)
 
-vectorizeInplaceOpArrTScalarT(add, string)
-vectorizeInplaceOpArrTScalarT(`+=`, T)
-vectorizeInplaceOpArrTScalarT(`-=`, T)
-vectorizeInplaceOpArrTScalarT(`*=`, T)
-vectorizeInplaceOpArrTScalarT(`/=`, T)
-vectorizeInplaceOpArrTScalarT(`&=`, string)
+vectorizeInplaceOpT(add, string)
+vectorizeInplaceOpT(`+=`, T)
+vectorizeInplaceOpT(`-=`, T)
+vectorizeInplaceOpT(`*=`, T)
+vectorizeInplaceOpT(`/=`, T)
+vectorizeInplaceOpT(`&=`, string)
 
-vectorizeInplaceOpArrTArrT(add, string)
-vectorizeInplaceOpArrTArrT(`+=`, T)
-vectorizeInplaceOpArrTArrT(`-=`, T)
-vectorizeInplaceOpArrTArrT(`*=`, T)
-vectorizeInplaceOpArrTArrT(`/=`, T)
-vectorizeInplaceOpArrTArrT(`&=`, string)
 
 vectorizeUnaryOpArrT(`not`, T, T)
+vectorizeUnaryOpArrT(fac, int, int)
+vectorizeUnaryOpArrT(sqrt, float, float)
+vectorizeUnaryOpArrT(ln, float, float)
+vectorizeUnaryOpArrT(log10, float, float)
+vectorizeUnaryOpArrT(exp, float, float)
+vectorizeUnaryOpArrT(round, float, float)
+vectorizeUnaryOpArrT(arccos, float, float)
+vectorizeUnaryOpArrT(arcsin, float, float)
+vectorizeUnaryOpArrT(arctan, float, float)
+vectorizeUnaryOpArrT(cos, float, float)
+vectorizeUnaryOpArrT(cosh, float, float)
+vectorizeUnaryOpArrT(sin, float, float)
+vectorizeUnaryOpArrT(sinh, float, float)
+vectorizeUnaryOpArrT(tan, float, float)
+vectorizeUnaryOpArrT(tanh, float, float)
+vectorizeUnaryOpArrT(random, T, T)
+vectorizeUnaryOpArrT(trunc, float, float)
+vectorizeUnaryOpArrT(floor, float, float)
+vectorizeUnaryOpArrT(ceil, float, float)
 
 
 when isMainModule:
@@ -673,22 +714,22 @@ when isMainModule:
 
   test "Size bigger than than underlying raw buffer throws RangeError":
     expect RangeError:
-      discard initSlicedArrayOnSeq([3,4,4], addr(raw))
+      discard initSlicedArrayOnSeq([3,4,4], raw)
 
   test "Nonsensical shape throws RangeError":
     expect RangeError:
-      discard initSlicedArrayOnSeq([-3,4,3], addr(raw))
+      discard initSlicedArrayOnSeq([-3,4,3], raw)
     expect RangeError:
-      discard initSlicedArrayOnSeq([3,-4,3], addr(raw))
+      discard initSlicedArrayOnSeq([3,-4,3], raw)
     expect RangeError:
-      discard initSlicedArrayOnSeq([3,4,-3], addr(raw))
+      discard initSlicedArrayOnSeq([3,4,-3], raw)
     expect RangeError:
-      discard initSlicedArrayOnSeq([3,-4,-3], addr(raw))
+      discard initSlicedArrayOnSeq([3,-4,-3], raw)
     expect RangeError:
-      discard initSlicedArrayOnSeq([-3,-4,-3], addr(raw))
+      discard initSlicedArrayOnSeq([-3,-4,-3], raw)
 
 
-  var arr = initSlicedArrayOnSeq([3,4,3], addr(raw))
+  var arr = initSlicedArrayOnSeq([3,4,3], raw)
 
   test "Shape, size, ndim, strides, offset, data, are correct":
     check arr.shape == @[3,4,3]
@@ -696,8 +737,26 @@ when isMainModule:
     check arr.ndim == 3
     check arr.strides == @[12,3,1]
     check arr.offset == 0
-    check arr.data == addr(raw)
+    check arr.data == raw
   
+
+  # FIXME turn these into unit tests
+  # arr is a shallow view on raw
+  raw[0] = 255
+  echo arr.data
+  raw[0] = 0
+  # `=` performs a deep copy
+  var arrdeep = arr
+  raw[0] = 255
+  echo arrdeep.data
+  raw[0] = 0
+  # but slicing is shallow
+  arrdeep = arr[fill]
+  raw[0] = 255
+  echo arrdeep.data
+  raw[0] = 0
+
+
   test "Invalid index shape throws IndexError":
     expect IndexError:
       discard arr[0,0,0,0]
@@ -799,7 +858,7 @@ when isMainModule:
 
   test "A view does not change the underlying data - it is still reversed":
     var revarr = arr[..|-1, ..|-1, ..|-1]
-    for i in 0..<revarr.size:
+    for i in 0.. <revarr.size:
       check revarr.data[i] == 35 - i
 
   test "A view is shallow - it shares the same underlying buffer":
@@ -897,7 +956,6 @@ when isMainModule:
   arr -= 1
   echo arr
 
-
   var arr1 = initSlicedArray[string]([3])
   arr1[0] = "zed"
   arr1[1] = "blah"
@@ -913,3 +971,31 @@ when isMainModule:
   arr1 &= arr2
   arr1.add(arr2)
   echo arr1.data
+
+  var arr3 = initSlicedArray[int]([3,4])
+  for ix in arr3.flat:
+    arr3[ix] = (ix[0]+1)*ix[1]
+  echo arr3.data
+  var arr4 = fac(arr3)
+  echo arr4.data
+  var arr5 = arr3.binom 3
+  echo arr5.data
+  var arr6 = 10.binom arr3
+  echo arr6.data
+
+  var arr7 = initSlicedArray[float]([3,4])
+  for ix in arr7.flat:
+    arr7[ix] = float ((ix[0]+1)*ix[1])
+  echo arr7.data
+  echo sqrt(arr7).data
+  arr7[0,0] = -1.0
+  echo sqrt(arr7).data
+
+  var arr8 = initSlicedArray[float]([3,4])
+  for ix in arr8.flat:
+    arr8[ix] = 10.0 
+  var arr9 = random(arr8)
+  echo arr8
+  echo arr9
+  echo floor(arr9).data
+  echo ceil(arr9).data
