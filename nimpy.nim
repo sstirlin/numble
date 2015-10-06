@@ -739,23 +739,14 @@ when isMainModule:
     check arr.offset == 0
     check arr.data == raw
   
-
-  # FIXME turn these into unit tests
-  # arr is a shallow view on raw
-  raw[0] = 255
-  echo arr.data
-  raw[0] = 0
-  # `=` performs a deep copy
-  var arrdeep = arr
-  raw[0] = 255
-  echo arrdeep.data
-  raw[0] = 0
-  # but slicing is shallow
-  arrdeep = arr[fill]
-  raw[0] = 255
-  echo arrdeep.data
-  raw[0] = 0
-
+  test "`=` performs a *deep* copy":
+    var oldval = arr[0,0,0]
+    var arrdeep = arr
+    check arrdeep[0,0,0] == oldval
+    arr[0,0,0] = high(int)
+    check arr[0,0,0] == high(int)
+    check arrdeep[0,0,0] == oldval
+    arr[0,0,0] = oldval
 
   test "Invalid index shape throws IndexError":
     expect IndexError:
@@ -870,12 +861,24 @@ when isMainModule:
 
   arr = arr[..|-1, ..|-1, ..|-1]
 
+
   test "Shape, size, ndim, strides, offset, are correct":
     check arr.shape == @[3,4,3]
     check arr.size == 36
     check arr.ndim == 3
     check arr.strides == @[-12,-3,-1]
     check arr.offset == 35
+
+  test "\"fill\" can be used like \"...\" is used in numpy":
+    var arr1 = arr[fill]  
+    for ix in arr1.flat:
+      check arr1[ix] == arr[ix]
+    var arr2 = arr[fill, ..|1]  
+    for ix in arr2.flat:
+      check arr2[ix] == arr[ix]
+    var arr3 = arr[..|1, fill]  
+    for ix in arr3.flat:
+      check arr3[ix] == arr[ix]
 
   test "A view of a view works - let's reverse the last index again":
     var revarr = arr[..|1, ..|1, ..|-1]
@@ -922,6 +925,22 @@ when isMainModule:
     check subarr.ndim == 3
     check subarr.strides == @[-24,-6,-1]
     check subarr.offset == 35
+
+  test "\"flat\" returns an iterator":
+    var subarr = arr[..|2, ..|2, ..|2]
+    var truth = @[0,2,6,8,24,26,30,32]
+    var i = 0
+    for ix in subarr.flat:
+      check subarr[ix] == truth[i]
+      i += 1
+
+  test "\"flatraw\" returns an iterator to raw data":
+    var subarr = arr[..|2, ..|2, ..|2]
+    var truth = @[0,2,6,8,24,26,30,32]
+    var i = 0
+    for ix in subarr.flatraw:
+     check subarr.data[ix] == truth[i]
+     i += 1
 
 #  echo (arr < 5).data
 #  for i in arr.flat:
