@@ -11,7 +11,7 @@ import typetraits
 
 type
 
-  SlicedArray*[T] = object of RootObj
+  StridedArray*[T] = object of RootObj
 
     shape*: seq[int]
     ndim*: int
@@ -21,7 +21,7 @@ type
     data*: seq[T]
 
 
-proc initNilSlicedArray[T](shape: openarray[int]): SlicedArray[T] =
+proc initNilStridedArray[T](shape: openarray[int]): StridedArray[T] =
 
   result.data = nil
   result.shape = @shape  # copies deeply
@@ -29,7 +29,7 @@ proc initNilSlicedArray[T](shape: openarray[int]): SlicedArray[T] =
   result.size = shape.foldl(a*b)
   for i in result.shape:
     if i < 1:
-      raise newException(RangeError, "SlicedArray shape must be list of integers > 0")
+      raise newException(RangeError, "StridedArray shape must be list of integers > 0")
 
   result.strides = newSeq[int](result.ndim)
   result.strides[result.ndim-1] = 1
@@ -39,73 +39,73 @@ proc initNilSlicedArray[T](shape: openarray[int]): SlicedArray[T] =
   result.offset = 0
 
 
-proc initSlicedArray*[T](shape: openarray[int]): SlicedArray[T] =
+proc empty*[T](shape: openarray[int]): StridedArray[T] =
 
-    result = initNilSlicedArray[T](shape)
+    result = initNilStridedArray[T](shape)
     result.data = newSeq[T](result.size)
 
 
-proc initSlicedArrayOnSeq*[T](shape: openarray[int], data: seq[T]): SlicedArray[T] =
+proc initStridedArrayOnSeq*[T](shape: openarray[int], data: seq[T]): StridedArray[T] =
 
-  result = initNilSlicedArray[T](shape)
+  result = initNilStridedArray[T](shape)
   if result.size > len(data):
-    raise newException(RangeError, "SlicedArray shape is larger than provided buffer")
+    raise newException(RangeError, "StridedArray shape is larger than provided buffer")
 
   shallowCopy(result.data, data)
 
 
-proc rawIx*[T](arr: SlicedArray[T], ix: seq[int]): int {.inline.} =
+proc rawIx*[T](arr: StridedArray[T], ix: seq[int]): int {.inline.} =
 
   var args = ix # mutable copy
 
   when compileOption("boundChecks"):
     if len(args) != arr.ndim:
-      raise newException(IndexError, "SlicedArray index must match shape")
+      raise newException(IndexError, "StridedArray index must match shape")
 
   result = arr.offset
   for i in 0.. <len(args):
     when compileOption("boundChecks"):
       if args[i] >= arr.shape[i] or args[i] < -arr.shape[i]:
-        raise newException(IndexError, "SlicedArray index is out of bounds")
+        raise newException(IndexError, "StridedArray index is out of bounds")
     if args[i] < 0:
       args[i] += arr.shape[i]
     result += args[i] * arr.strides[i]
 
 
-proc rawIx*[T](arr: SlicedArray[T], ix: varargs[int]): int {.inline.} =
+proc rawIx*[T](arr: StridedArray[T], ix: varargs[int]): int {.inline.} =
 
   var args = @ix # mutable copy
 
   when compileOption("boundChecks"):
     if len(args) != arr.ndim:
-      raise newException(IndexError, "SlicedArray index must match shape")
+      raise newException(IndexError, "StridedArray index must match shape")
 
   result = arr.offset
   for i in 0.. <len(args):
     when compileOption("boundChecks"):
       if args[i] >= arr.shape[i] or args[i] < -arr.shape[i]:
-        raise newException(IndexError, "SlicedArray index is out of bounds")
+        raise newException(IndexError, "StridedArray index is out of bounds")
     if args[i] < 0:
       args[i] += arr.shape[i]
     result += args[i] * arr.strides[i]
 
 
-template `[]`*[T](arr: SlicedArray[T], ix: varargs[int]): expr =
+template `[]`*[T](arr: StridedArray[T], ix: varargs[int]): expr =
 
   arr.data[arr.rawIx(ix)]
 
 
-template `[]`*[T](arr: SlicedArray[T], ix: seq[int]): expr =
+template `[]`*[T](arr: StridedArray[T], ix: seq[int]): expr =
 
   arr.data[arr.rawIx(ix)]
 
 
-proc `[]=`*[T](arr: var SlicedArray[T], ix: varargs[int], rhs: T) =
+proc `[]=`*[T](arr: var StridedArray[T], ix: varargs[int], rhs: T) =
 
   arr.data[arr.rawIx(ix)] = rhs
 
 
-proc `[]=`*[T](arr: var SlicedArray[T], ix: seq[int], rhs: T) =
+proc `[]=`*[T](arr: var StridedArray[T], ix: seq[int], rhs: T) =
 
   arr.data[arr.rawIx(ix)] = rhs
 
@@ -129,18 +129,18 @@ proc initSteppedSlice*(a, b, step: int, incEnd: bool): SteppedSlice =
 const _ = high(int)
     
 
-macro `[]`[T](arr: SlicedArray[T], e: string): expr =
+macro `[]`[T](arr: StridedArray[T], e: string): expr =
 
   var args = split(e.strVal, ",")
   var code = $arr & "["
 
   for i in 0.. <len(args):
     if strip(args[i]) == "...":
-      code.add("fill")
+      code.add("all")
     else:
       var ixs = split(strip(args[i]), ":")
       if len(ixs) == 0 or len(ixs) > 3:
-        error("SlicedArray slice index is invalid")
+        error("StridedArray slice index is invalid")
       elif len(ixs) == 1:
         code.add(ixs[0])
       elif len(ixs) > 1:
@@ -340,26 +340,26 @@ proc `..|+`*(step: int): SteppedSlice =
   result.incEnd = true
 
 
-let fill = initSteppedSlice(0,0,0,true)
+let all = initSteppedSlice(0,0,0,true)
 
 
-proc `[]`*[T](arr: SlicedArray[T], ix: varargs[SteppedSlice]): SlicedArray[T] =
+proc `[]`*[T](arr: StridedArray[T], ix: varargs[SteppedSlice]): StridedArray[T] =
 
   var args = newSeq[SteppedSlice](0)
   
-  # If 'fill' specified in front or back then expand it
-  if ix[0] == fill:
+  # If 'all' specified in front or back then expand it
+  if ix[0] == all:
     for i in 1..(len(ix)-1):
-      if ix[i] == fill:
-        raise newException(IndexError, "'fill' is only allowed either at the front or back of an SlicedArray, and never at the same time")
+      if ix[i] == all:
+        raise newException(IndexError, "'all' is only allowed either at the front or back of an StridedArray, and never at the same time")
     for i in 1..(arr.ndim-(len(ix)-1)):
       args.add(..|1)
     for i in 1..(len(ix)-1):
       args.add(ix[i])
-  elif ix[len(ix)-1] == fill:
+  elif ix[len(ix)-1] == all:
     for i in 0..(len(ix)-2):
-      if ix[i] == fill:
-        raise newException(IndexError, "'fill' is only allowed either at the front or back of an SlicedArray, and never at the same time")
+      if ix[i] == all:
+        raise newException(IndexError, "'all' is only allowed either at the front or back of an StridedArray, and never at the same time")
     for i in 0..(len(ix)-2):
       args.add(ix[i])
     for i in 1..(arr.ndim-(len(ix)-1)):
@@ -369,7 +369,7 @@ proc `[]`*[T](arr: SlicedArray[T], ix: varargs[SteppedSlice]): SlicedArray[T] =
       args.add(ix[i])
 
   if len(args) != arr.ndim:
-    raise newException(IndexError, "new SlicedArray must have same shape as original")
+    raise newException(IndexError, "new StridedArray must have same shape as original")
 
   result.shape = arr.shape
   result.ndim = arr.ndim
@@ -399,16 +399,16 @@ proc `[]`*[T](arr: SlicedArray[T], ix: varargs[SteppedSlice]): SlicedArray[T] =
         args[i].a = 0
 
     if args[i].a >= arr.shape[i] or args[i].a < -arr.shape[i]:
-      raise newException(IndexError, "SlicedArray index is out of bounds")
+      raise newException(IndexError, "StridedArray index is out of bounds")
     if args[i].b >= arr.shape[i] or args[i].b < -arr.shape[i]:
-      raise newException(IndexError, "SlicedArray index is out of bounds")
+      raise newException(IndexError, "StridedArray index is out of bounds")
     if args[i].a < 0:
       args[i].a += arr.shape[i]
     if args[i].b < 0:
       args[i].b += arr.shape[i]
     args[i].b -= (args[i].b - args[i].a) mod args[i].step  # make array bounds evenly divisible by stepsize
     if (args[i].b - args[i].a) div args[i].step < 0:
-      raise newException(IndexError, "SlicedArray must have range in same direction as step")
+      raise newException(IndexError, "StridedArray must have range in same direction as step")
 
   # set offset
   for i, v in args:
@@ -422,7 +422,7 @@ proc `[]`*[T](arr: SlicedArray[T], ix: varargs[SteppedSlice]): SlicedArray[T] =
     result.size *= result.shape[i]
 
 
-iterator flat[T](arr: SlicedArray[T]): seq[int] =
+iterator flat[T](arr: StridedArray[T]): seq[int] =
 
   var ix = newSeq[int](arr.ndim)
   for dim in 0.. <arr.ndim:
@@ -437,7 +437,7 @@ iterator flat[T](arr: SlicedArray[T]): seq[int] =
         break
 
 
-iterator flatraw[T](arr: SlicedArray[T]): int =
+iterator flatraw[T](arr: StridedArray[T]): int =
 
   var ix = newSeq[int](arr.ndim)
   for dim in 0.. <arr.ndim:
@@ -452,6 +452,12 @@ iterator flatraw[T](arr: SlicedArray[T]): int =
         break
 
 
+proc fill*[T](arr: StridedArray[T], val: T) =
+
+  for ix in arr.flat:
+    arr[ix] = val
+
+
 macro vectorizeBinOpArrScalarT*(op, T, Tout: expr): stmt {.immediate.} =
 
   var opstr = "" 
@@ -460,9 +466,9 @@ macro vectorizeBinOpArrScalarT*(op, T, Tout: expr): stmt {.immediate.} =
   else:
     opstr = $op
   let body = """
-             proc $1*[$2](arr: SlicedArray[$2], s: $2): SlicedArray[$3] =
+             proc $1*[$2](arr: StridedArray[$2], s: $2): StridedArray[$3] =
 
-               result = initSlicedArray[$3](arr.shape)
+               result = empty[$3](arr.shape)
                for ix in arr.flat:
                  result[ix] = $1[$2](arr[ix], s) 
              """ % [opstr, $T, $Tout]
@@ -477,9 +483,9 @@ macro vectorizeBinOpScalarArrT*(op, T, Tout: expr): stmt {.immediate.} =
   else:
     opstr = $op
   let body = """
-             proc $1*[$2](s: $2, arr: SlicedArray[$2]): SlicedArray[$3] =
+             proc $1*[$2](s: $2, arr: StridedArray[$2]): StridedArray[$3] =
 
-               result = initSlicedArray[$3](arr.shape)
+               result = empty[$3](arr.shape)
                for ix in arr.flat:
                  result[ix] = $1[$2](s, arr[ix]) 
              """ % [opstr, $T, $Tout]
@@ -494,12 +500,12 @@ macro vectorizeBinOpArrArrT*(op, T, Tout: expr): stmt {.immediate.} =
   else:
     opstr = $op
   let body = """
-             proc $1*[$2](arr: SlicedArray[$2], s: SlicedArray[$2]): SlicedArray[$3] =
+             proc $1*[$2](arr: StridedArray[$2], s: StridedArray[$2]): StridedArray[$3] =
 
                if arr.shape != s.shape:
-                 raise newException(RangeError, "SlicedArrays must have same shape")
+                 raise newException(RangeError, "StridedArrays must have same shape")
 
-               result = initSlicedArray[$3](arr.shape)
+               result = empty[$3](arr.shape)
                for ix in arr.flat:
                  result[ix] = $1[$2](arr[ix], s[ix]) 
              """ % [opstr, $T, $Tout]
@@ -521,9 +527,9 @@ macro vectorizeBinOpArrTScalarS*(op, T, S, Tout: expr): stmt {.immediate.} =
   else:
     opstr = $op
   let body = """
-             proc $1*[$2, $3](arr: SlicedArray[$2], s: $3): SlicedArray[$4] =
+             proc $1*[$2, $3](arr: StridedArray[$2], s: $3): StridedArray[$4] =
 
-               result = initSlicedArray[$4](arr.shape)
+               result = empty[$4](arr.shape)
                for ix in arr.flat:
                  result[ix] = $1[$2, $3](arr[ix], s) 
              """ % [opstr, $T, $S, $Tout]
@@ -538,9 +544,9 @@ macro vectorizeBinOpScalarSArrT*(op, S, T, Tout: expr): stmt {.immediate.} =
   else:
     opstr = $op
   let body = """
-             proc $1*[$2, $3](s: $2, arr: SlicedArray[$3]): SlicedArray[$4] =
+             proc $1*[$2, $3](s: $2, arr: StridedArray[$3]): StridedArray[$4] =
 
-               result = initSlicedArray[$4](arr.shape)
+               result = empty[$4](arr.shape)
                for ix in arr.flat:
                  result[ix] = $1[$2, $3](s, arr[ix]) 
              """ % [opstr, $S, $T, $Tout]
@@ -555,12 +561,12 @@ macro vectorizeBinOpArrTArrS*(op, T, S, Tout: expr): stmt {.immediate.} =
   else:
     opstr = $op
   let body = """
-             proc $1*[$2, $3](arr: SlicedArray[$2], s: SlicedArray[$3]): SlicedArray[$4] =
+             proc $1*[$2, $3](arr: StridedArray[$2], s: StridedArray[$3]): StridedArray[$4] =
 
                if arr.shape != s.shape:
-                 raise newException(RangeError, "SlicedArrays must have same shape")
+                 raise newException(RangeError, "StridedArrays must have same shape")
 
-               result = initSlicedArray[$4](arr.shape)
+               result = empty[$4](arr.shape)
                for ix in arr.flat:
                  result[ix] = $1[$2, $3](arr[ix], s[ix]) 
              """ % [opstr, $T, $S, $Tout]
@@ -582,7 +588,7 @@ macro vectorizeInplaceOpArrScalarT*(op, T: expr): stmt {.immediate.} =
   else:
     opstr = $op
   let body = """
-             proc $1*[$2](arr: var SlicedArray[$2], s: $2) =
+             proc $1*[$2](arr: var StridedArray[$2], s: $2) =
 
                for ix in arr.flat:
                  $1(arr[ix], s) 
@@ -598,10 +604,10 @@ macro vectorizeInplaceOpArrArrT*(op, T: expr): stmt {.immediate.} =
   else:
     opstr = $op
   let body = """
-             proc $1*[$2](arr: var SlicedArray[$2], s: SlicedArray[$2]) =
+             proc $1*[$2](arr: var StridedArray[$2], s: StridedArray[$2]) =
 
                if arr.shape != s.shape:
-                 raise newException(RangeError, "SlicedArrays must have same shape")
+                 raise newException(RangeError, "StridedArrays must have same shape")
 
                for ix in arr.flat:
                  $1(arr[ix], s[ix]) 
@@ -623,9 +629,9 @@ macro vectorizeUnaryOpArrT*(op, T, Tout: expr): stmt {.immediate.} =
   else:
     opstr = $op
   let body = """
-             proc $1*[$2](arr: SlicedArray[$2]): SlicedArray[$3] =
+             proc $1*[$2](arr: StridedArray[$2]): StridedArray[$3] =
 
-               result = initSlicedArray[$3](arr.shape)
+               result = empty[$3](arr.shape)
                for ix in arr.flat:
                  result[ix] = $1[$2](arr[ix]) 
              """ % [opstr, $T, $Tout]
@@ -714,22 +720,22 @@ when isMainModule:
 
   test "Size bigger than than underlying raw buffer throws RangeError":
     expect RangeError:
-      discard initSlicedArrayOnSeq([3,4,4], raw)
+      discard initStridedArrayOnSeq([3,4,4], raw)
 
   test "Nonsensical shape throws RangeError":
     expect RangeError:
-      discard initSlicedArrayOnSeq([-3,4,3], raw)
+      discard initStridedArrayOnSeq([-3,4,3], raw)
     expect RangeError:
-      discard initSlicedArrayOnSeq([3,-4,3], raw)
+      discard initStridedArrayOnSeq([3,-4,3], raw)
     expect RangeError:
-      discard initSlicedArrayOnSeq([3,4,-3], raw)
+      discard initStridedArrayOnSeq([3,4,-3], raw)
     expect RangeError:
-      discard initSlicedArrayOnSeq([3,-4,-3], raw)
+      discard initStridedArrayOnSeq([3,-4,-3], raw)
     expect RangeError:
-      discard initSlicedArrayOnSeq([-3,-4,-3], raw)
+      discard initStridedArrayOnSeq([-3,-4,-3], raw)
 
 
-  var arr = initSlicedArrayOnSeq([3,4,3], raw)
+  var arr = initStridedArrayOnSeq([3,4,3], raw)
 
   test "Shape, size, ndim, strides, offset, data, are correct":
     check arr.shape == @[3,4,3]
@@ -869,14 +875,14 @@ when isMainModule:
     check arr.strides == @[-12,-3,-1]
     check arr.offset == 35
 
-  test "\"fill\" can be used like \"...\" is used in numpy":
-    var arr1 = arr[fill]  
+  test "\"all\" can be used like \"...\" is used in numpy":
+    var arr1 = arr[all]
     for ix in arr1.flat:
       check arr1[ix] == arr[ix]
-    var arr2 = arr[fill, ..|1]  
+    var arr2 = arr[all, ..|1]
     for ix in arr2.flat:
       check arr2[ix] == arr[ix]
-    var arr3 = arr[..|1, fill]  
+    var arr3 = arr[..|1, all]
     for ix in arr3.flat:
       check arr3[ix] == arr[ix]
 
@@ -942,30 +948,86 @@ when isMainModule:
      check subarr.data[ix] == truth[i]
      i += 1
 
-#  echo (arr < 5).data
-#  for i in arr.flat:
-#    echo i
-  var boolmask = arr == 5
-  echo boolmask.data
-  boolmask = arr <= 5
-  echo boolmask.data
-  boolmask = arr < 5
-  echo boolmask.data
-  boolmask = arr >= 5
-  echo boolmask.data
-  boolmask = arr > 5
-  echo boolmask.data
+  test "basic boolean operations":
 
-  boolmask = 5 == arr
-  echo boolmask.data
-  boolmask = 5 <= arr
-  echo boolmask.data
-  boolmask = 5 < arr
-  echo boolmask.data
-  boolmask = 5 >= arr
-  echo boolmask.data
-  boolmask = 5 > arr
-  echo boolmask.data
+    #var allfives = 
+    var boolmask = arr == 5 or arr == 6 # arr op scalar
+    for i in arr.flat:
+      if arr[i] == 5 or arr[i] == 6:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+    
+    boolmask = 5 == arr or 6 == arr # scalar op arr
+    for i in arr.flat:
+      if arr[i] == 5 or arr[i] == 6:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+    boolmask = arr == 5 and arr == 6
+    for i in arr.flat:
+      check boolmask[i] == false
+
+    boolmask = 5 == arr and 6 == arr
+    for i in arr.flat:
+      check boolmask[i] == false
+
+    boolmask = arr <= 5
+    for i in arr.flat:
+      if arr[i] <= 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+    boolmask = 5 >= arr
+    for i in arr.flat:
+      if arr[i] <= 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+    boolmask = arr < 5
+    for i in arr.flat:
+      if arr[i] < 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+    boolmask = 5 > arr
+    for i in arr.flat:
+      if arr[i] < 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+    boolmask = arr > 5
+    for i in arr.flat:
+      if arr[i] > 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+    
+    boolmask = 5 < arr
+    for i in arr.flat:
+      if arr[i] > 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+    boolmask = arr >= 5
+    for i in arr.flat:
+      if arr[i] >= 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+    boolmask = 5 <= arr
+    for i in arr.flat:
+      if arr[i] >= 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
 
   var intmask = not arr
   echo intmask.data
@@ -975,7 +1037,7 @@ when isMainModule:
   arr -= 1
   echo arr
 
-  var arr1 = initSlicedArray[string]([3])
+  var arr1 = empty[string]([3])
   arr1[0] = "zed"
   arr1[1] = "blah"
   arr1[2] = "phrrt"
@@ -983,7 +1045,7 @@ when isMainModule:
   arr1 &= "blech"
   echo arr1.data
 
-  var arr2 = initSlicedArray[string]([3])
+  var arr2 = empty[string]([3])
   arr2[0] = "dez"
   arr2[1] = "halb"
   arr2[2] = "trrhp"
@@ -991,7 +1053,7 @@ when isMainModule:
   arr1.add(arr2)
   echo arr1.data
 
-  var arr3 = initSlicedArray[int]([3,4])
+  var arr3 = empty[int]([3,4])
   for ix in arr3.flat:
     arr3[ix] = (ix[0]+1)*ix[1]
   echo arr3.data
@@ -1002,7 +1064,7 @@ when isMainModule:
   var arr6 = 10.binom arr3
   echo arr6.data
 
-  var arr7 = initSlicedArray[float]([3,4])
+  var arr7 = empty[float]([3,4])
   for ix in arr7.flat:
     arr7[ix] = float ((ix[0]+1)*ix[1])
   echo arr7.data
@@ -1010,7 +1072,7 @@ when isMainModule:
   arr7[0,0] = -1.0
   echo sqrt(arr7).data
 
-  var arr8 = initSlicedArray[float]([3,4])
+  var arr8 = empty[float]([3,4])
   for ix in arr8.flat:
     arr8[ix] = 10.0 
   var arr9 = random(arr8)
