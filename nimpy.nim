@@ -41,11 +41,16 @@ proc initNilStridedArray[T](shape: openarray[int]): StridedArray[T] =
 
 proc empty*[T](shape: openarray[int]): StridedArray[T] =
 
-    result = initNilStridedArray[T](shape)
-    result.data = newSeq[T](result.size)
+  result = initNilStridedArray[T](shape)
+  result.data = newSeq[T](result.size)
 
 
-proc initStridedArrayOnSeq*[T](shape: openarray[int], data: seq[T]): StridedArray[T] =
+proc emptyLike*[T](arr: StridedArray[T]): StridedArray[T] =
+
+  result = empty[T](arr.shape) 
+
+
+proc stridedView*[T](data: seq[T], shape: openarray[int]): StridedArray[T] =
 
   result = initNilStridedArray[T](shape)
   if result.size > len(data):
@@ -452,7 +457,7 @@ iterator flatraw[T](arr: StridedArray[T]): int =
         break
 
 
-proc fill*[T](arr: StridedArray[T], val: T) =
+proc fill*[T](arr: var StridedArray[T], val: T) =
 
   for ix in arr.flat:
     arr[ix] = val
@@ -638,26 +643,42 @@ macro vectorizeUnaryOpArrT*(op, T, Tout: expr): stmt {.immediate.} =
   result = parseStmt(body)
 
 
+macro vectorizeTypeConversion*(totype, T: expr): stmt {.immediate.} =
+
+  let body = """
+             proc to$1*[$2](arr: StridedArray[$2]): StridedArray[$1] =
+
+               result = empty[$1](arr.shape)
+               for ix in arr.flat:
+                 result[ix] = $1(arr[ix]) 
+             """ % [$totype, $T]
+  result = parseStmt(body)
+
+
 vectorizeBinOpT(`==`, T, bool)
 vectorizeBinOpT(`!=`, T, bool)
 vectorizeBinOpT(`<`, T, bool)
 vectorizeBinOpT(`<=`, T, bool)
 vectorizeBinOpT(`>`, T, bool)
 vectorizeBinOpT(`>=`, T, bool)
-vectorizeBinOpT(`+`, T, T)
-vectorizeBinOpT(`-`, T, T)
-vectorizeBinOpT(`*`, T, T)
-vectorizeBinOpT(`/`, T, T)
+
 vectorizeBinOpT(`==%`, T, bool)
 vectorizeBinOpT(`<%`, T, bool)
 vectorizeBinOpT(`<=%`, T, bool)
 vectorizeBinOpT(`>%`, T, bool)
 vectorizeBinOpT(`>=%`, T, bool)
+
+vectorizeBinOpT(`+`, T, T)
+vectorizeBinOpT(`-`, T, T)
+vectorizeBinOpT(`*`, T, T)
+vectorizeBinOpT(`/`, T, T)
+
 vectorizeBinOpT(`+%`, T, T)
 vectorizeBinOpT(`-%`, T, T)
 vectorizeBinOpT(`*%`, T, T)
 vectorizeBinOpT(`/%`, T, T)
 vectorizeBinOpT(`%%`, T, T)
+
 vectorizeBinOpT(`div`, T, T)
 vectorizeBinOpT(`mod`, T, T)
 vectorizeBinOpT(`shr`, T, T)
@@ -711,31 +732,55 @@ vectorizeUnaryOpArrT(floor, float, float)
 vectorizeUnaryOpArrT(ceil, float, float)
 
 
+# generates toInt, toFloat, toFloat32, etc.
+vectorizeTypeConversion(int, T)
+vectorizeTypeConversion(int8, T)
+vectorizeTypeConversion(int16, T)
+vectorizeTypeConversion(int32, T)
+vectorizeTypeConversion(int64, T)
+vectorizeTypeConversion(uint, T)
+vectorizeTypeConversion(uint8, T)
+vectorizeTypeConversion(uint16, T)
+vectorizeTypeConversion(uint32, T)
+vectorizeTypeConversion(uint64, T)
+vectorizeTypeConversion(float, T)
+vectorizeTypeConversion(float32, T)
+vectorizeTypeConversion(float64, T)
+
+
 when isMainModule:
 
 
+  test "Can create empty StridedArray and fill it with a value":
+    var arr = empty[float]([3,4,3])
+    arr.fill(5.0)
+    for ix in arr.flat:
+      check arr[ix] == 5.0
+
+  # or we can attach to an existing sequence with a shallow view
+  # using the "stridedView" proc
   var raw = newSeq[int](36)
   for i in 0..35:
       raw[i] = i
 
   test "Size bigger than than underlying raw buffer throws RangeError":
     expect RangeError:
-      discard initStridedArrayOnSeq([3,4,4], raw)
+      discard stridedView(raw, [3,4,4])
 
   test "Nonsensical shape throws RangeError":
     expect RangeError:
-      discard initStridedArrayOnSeq([-3,4,3], raw)
+      discard stridedView(raw, [-3,4,3])
     expect RangeError:
-      discard initStridedArrayOnSeq([3,-4,3], raw)
+      discard stridedView(raw, [3,-4,3])
     expect RangeError:
-      discard initStridedArrayOnSeq([3,4,-3], raw)
+      discard stridedView(raw, [3,4,-3])
     expect RangeError:
-      discard initStridedArrayOnSeq([3,-4,-3], raw)
+      discard stridedView(raw, [3,-4,-3])
     expect RangeError:
-      discard initStridedArrayOnSeq([-3,-4,-3], raw)
+      discard stridedView(raw, [-3,-4,-3])
 
 
-  var arr = initStridedArrayOnSeq([3,4,3], raw)
+  var arr = stridedView(raw, [3,4,3])
 
   test "Shape, size, ndim, strides, offset, data, are correct":
     check arr.shape == @[3,4,3]
@@ -875,7 +920,7 @@ when isMainModule:
     check arr.strides == @[-12,-3,-1]
     check arr.offset == 35
 
-  test "\"all\" can be used like \"...\" is used in numpy":
+  test "\"all\" is used like \"...\" is used in Python":
     var arr1 = arr[all]
     for ix in arr1.flat:
       check arr1[ix] == arr[ix]
@@ -948,66 +993,108 @@ when isMainModule:
      check subarr.data[ix] == truth[i]
      i += 1
 
-  test "basic boolean operations":
+  test "== works":
 
-    #var allfives = 
-    var boolmask = arr == 5 or arr == 6 # arr op scalar
+    # arr == scalar
+    var boolmask = arr == 5
+    for i in arr.flat:
+      if arr[i] == 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+    
+    # scalar == arr
+    boolmask = 5 == arr
+    for i in arr.flat:
+      if arr[i] == 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+    # arr == arr
+    var allfives = emptyLike(arr)
+    allfives.fill(5)
+
+    boolmask = arr == allfives
+    for i in arr.flat:
+      if arr[i] == 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+  test "`or` works":
+
+    # arr == scalar
+    var boolmask = arr == 5 or arr == 6
     for i in arr.flat:
       if arr[i] == 5 or arr[i] == 6:
         check boolmask[i] == true
       else:
         check boolmask[i] == false
     
-    boolmask = 5 == arr or 6 == arr # scalar op arr
+    # scalar == arr
+    boolmask = 5 == arr or 6 == arr
     for i in arr.flat:
       if arr[i] == 5 or arr[i] == 6:
         check boolmask[i] == true
       else:
         check boolmask[i] == false
 
-    boolmask = arr == 5 and arr == 6
-    for i in arr.flat:
-      check boolmask[i] == false
+    # arr == arr
+    var allfives = emptyLike(arr)
+    allfives.fill(5)
+    var allsixes = emptyLike(arr)
+    allsixes.fill(6)
 
+    boolmask = arr == allfives or arr == allsixes
+    for i in arr.flat:
+      if arr[i] == 5 or arr[i] == 6:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+  test "`and` works":
+
+    # arr == scalar
+    var boolmask = arr == 5 and arr == 6
+    for i in arr.flat:
+      if arr[i] == 5 and arr[i] == 6:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+    
+    # scalar == arr
     boolmask = 5 == arr and 6 == arr
     for i in arr.flat:
-      check boolmask[i] == false
-
-    boolmask = arr <= 5
-    for i in arr.flat:
-      if arr[i] <= 5:
+      if arr[i] == 5 and arr[i] == 6:
         check boolmask[i] == true
       else:
         check boolmask[i] == false
 
-    boolmask = 5 >= arr
+    # arr == arr
+    var allfives = emptyLike(arr)
+    allfives.fill(5)
+    var allsixes = emptyLike(arr)
+    allsixes.fill(6)
+
+    boolmask = arr == allfives and arr == allsixes
     for i in arr.flat:
-      if arr[i] <= 5:
+      if arr[i] == 5 and arr[i] == 6:
         check boolmask[i] == true
       else:
         check boolmask[i] == false
 
-    boolmask = arr < 5
+  test "< works":
+
+    # arr < scalar
+    var boolmask = arr < 5
     for i in arr.flat:
       if arr[i] < 5:
-        check boolmask[i] == true
-      else:
-        check boolmask[i] == false
-
-    boolmask = 5 > arr
-    for i in arr.flat:
-      if arr[i] < 5:
-        check boolmask[i] == true
-      else:
-        check boolmask[i] == false
-
-    boolmask = arr > 5
-    for i in arr.flat:
-      if arr[i] > 5:
         check boolmask[i] == true
       else:
         check boolmask[i] == false
     
+    # scalar < arr
     boolmask = 5 < arr
     for i in arr.flat:
       if arr[i] > 5:
@@ -1015,13 +1102,28 @@ when isMainModule:
       else:
         check boolmask[i] == false
 
-    boolmask = arr >= 5
+    # arr == arr
+    var allfives = emptyLike(arr)
+    allfives.fill(5)
+
+    boolmask = arr < allfives
     for i in arr.flat:
-      if arr[i] >= 5:
+      if arr[i] < 5:
         check boolmask[i] == true
       else:
         check boolmask[i] == false
 
+  test "<= works":
+
+    # arr <= scalar
+    var boolmask = arr <= 5
+    for i in arr.flat:
+      if arr[i] <= 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+    
+    # scalar <= arr
     boolmask = 5 <= arr
     for i in arr.flat:
       if arr[i] >= 5:
@@ -1029,54 +1131,227 @@ when isMainModule:
       else:
         check boolmask[i] == false
 
-  var intmask = not arr
-  echo intmask.data
+    # arr <= arr
+    var allfives = emptyLike(arr)
+    allfives.fill(5)
 
-  arr += 1
-  echo arr
-  arr -= 1
-  echo arr
+    boolmask = arr <= allfives
+    for i in arr.flat:
+      if arr[i] <= 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
 
-  var arr1 = empty[string]([3])
-  arr1[0] = "zed"
-  arr1[1] = "blah"
-  arr1[2] = "phrrt"
-  arr1.add("haha")
-  arr1 &= "blech"
-  echo arr1.data
+  test "> works":
 
-  var arr2 = empty[string]([3])
-  arr2[0] = "dez"
-  arr2[1] = "halb"
-  arr2[2] = "trrhp"
-  arr1 &= arr2
-  arr1.add(arr2)
-  echo arr1.data
+    # arr > scalar
+    var boolmask = arr > 5
+    for i in arr.flat:
+      if arr[i] > 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+    
+    # scalar > arr
+    boolmask = 5 > arr
+    for i in arr.flat:
+      if arr[i] < 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
 
-  var arr3 = empty[int]([3,4])
-  for ix in arr3.flat:
-    arr3[ix] = (ix[0]+1)*ix[1]
-  echo arr3.data
-  var arr4 = fac(arr3)
-  echo arr4.data
-  var arr5 = arr3.binom 3
-  echo arr5.data
-  var arr6 = 10.binom arr3
-  echo arr6.data
+    # arr == arr
+    var allfives = emptyLike(arr)
+    allfives.fill(5)
 
-  var arr7 = empty[float]([3,4])
-  for ix in arr7.flat:
-    arr7[ix] = float ((ix[0]+1)*ix[1])
-  echo arr7.data
-  echo sqrt(arr7).data
-  arr7[0,0] = -1.0
-  echo sqrt(arr7).data
+    boolmask = arr > allfives
+    for i in arr.flat:
+      if arr[i] > 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
 
-  var arr8 = empty[float]([3,4])
-  for ix in arr8.flat:
-    arr8[ix] = 10.0 
-  var arr9 = random(arr8)
-  echo arr8
-  echo arr9
-  echo floor(arr9).data
-  echo ceil(arr9).data
+  test ">= works":
+
+    # arr >= scalar
+    var boolmask = arr >= 5
+    for i in arr.flat:
+      if arr[i] >= 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+    
+    # scalar >= arr
+    boolmask = 5 >= arr
+    for i in arr.flat:
+      if arr[i] <= 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+    # arr >= arr
+    var allfives = emptyLike(arr)
+    allfives.fill(5)
+
+    boolmask = arr >= allfives
+    for i in arr.flat:
+      if arr[i] >= 5:
+        check boolmask[i] == true
+      else:
+        check boolmask[i] == false
+
+  test "`not` works":
+    var notmask = not arr
+    for ix in notmask.flat:
+      check notmask[ix] == not arr[ix]
+
+  test "`+=` works":
+    var temp = arr # deep copy
+    temp += 1 
+    for ix in temp.flat:
+      check temp[ix] == arr[ix] + 1
+
+  test "`-=` works":
+    var temp = arr # deep copy
+    temp -= 1 
+    for ix in temp.flat:
+      check temp[ix] == arr[ix] - 1
+
+  test "`*=` works":
+    var temp = arr # deep copy
+    temp *= 2 
+    for ix in temp.flat:
+      check temp[ix] == arr[ix] * 2 
+
+  test "`/=` works":
+    var temp = arr.toFloat
+    temp /= 2 
+    for ix in temp.flat:
+      check temp[ix] == arr[ix] / 2 
+
+  test "string \"add\" works":
+
+    var strarr = empty[string]([3])
+    strarr[0] = "zed"
+    strarr[1] = "is"
+    strarr[2] = "dead"
+    strarr.add("haha")
+    check strarr[0] == "zedhaha"
+    check strarr[1] == "ishaha"
+    check strarr[2] == "deadhaha"
+
+    var after = empty[string]([3])
+    after[0] = "dez"
+    after[1] = "si"
+    after[2] = "daed"
+    strarr.add(after)
+    check strarr[0] == "zedhahadez"
+    check strarr[1] == "ishahasi"
+    check strarr[2] == "deadhahadaed"
+
+  test "string \"&=\" works":
+
+    var strarr = empty[string]([3])
+    strarr[0] = "zed"
+    strarr[1] = "is"
+    strarr[2] = "dead"
+    strarr &= "haha"
+    check strarr[0] == "zedhaha"
+    check strarr[1] == "ishaha"
+    check strarr[2] == "deadhaha"
+
+    var after = empty[string]([3])
+    after[0] = "dez"
+    after[1] = "si"
+    after[2] = "daed"
+    strarr &= after
+    check strarr[0] == "zedhahadez"
+    check strarr[1] == "ishahasi"
+    check strarr[2] == "deadhahadaed"
+
+  test "string \"&\" works":
+
+    var strarr = empty[string]([3])
+    strarr[0] = "zed"
+    strarr[1] = "is"
+    strarr[2] = "dead"
+    strarr = strarr & "haha"
+    check strarr[0] == "zedhaha"
+    check strarr[1] == "ishaha"
+    check strarr[2] == "deadhaha"
+
+    var after = empty[string]([3])
+    after[0] = "dez"
+    after[1] = "si"
+    after[2] = "daed"
+    strarr = strarr & after
+    check strarr[0] == "zedhahadez"
+    check strarr[1] == "ishahasi"
+    check strarr[2] == "deadhahadaed"
+
+  test "^ works":
+
+    var temp = arr^2
+    for ix in temp.flat:
+      check temp[ix] == arr[ix]^2
+
+    temp = 2^arr
+    for ix in temp.flat:
+      check temp[ix] == 2^arr[ix]
+
+    var evenodd = arr mod 2
+    temp = arr^evenodd
+    for ix in temp.flat:
+      if arr[ix] mod 2 == 0:
+        check temp[ix] == 1
+      else:
+        check temp[ix] == arr[ix]
+
+  test "+ works":
+
+    var temp = arr+2
+    for ix in temp.flat:
+      check temp[ix] == arr[ix]+2
+
+    temp = 2+arr
+    for ix in temp.flat:
+      check temp[ix] == 2+arr[ix]
+
+    var evenodd = arr mod 2
+    temp = arr+evenodd
+    for ix in temp.flat:
+      if arr[ix] mod 2 == 0:
+        check temp[ix] == arr[ix] 
+      else:
+        check temp[ix] == arr[ix] + 1
+
+  test "`binom` works":
+
+    var temp = binom(arr, 2)
+    for ix in temp.flat:
+      check temp[ix] == binom(arr[ix], 2)
+
+    temp = binom(35, arr)
+    for ix in temp.flat:
+      check temp[ix] == binom(35, arr[ix])
+
+    var evenodd = arr mod 2
+    temp = binom(arr, evenodd)
+    for ix in temp.flat:
+      if arr[ix] mod 2 == 0:
+        check temp[ix] == binom(arr[ix], 0)
+      else:
+        check temp[ix] == binom(arr[ix], 1)
+
+
+  # FIXME check other binary operations
+
+
+  test "\"sqrt\" works":
+    var temp = toFloat(arr)
+    temp = sqrt(temp) 
+    for ix in temp.flat:
+      check temp[ix] == sqrt(float(arr[ix]))
+
+
+  # FIXME check other unary operations
