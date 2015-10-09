@@ -11,7 +11,7 @@ import typetraits
 
 type
 
-  StridedArray*[T] = object of RootObj
+  StridedArrayObj*[T] = object of RootObj
 
     shape*: seq[int]
     ndim*: int
@@ -19,12 +19,29 @@ type
     strides*: seq[int]
     offset*: int
     data*: seq[T]
+    mask*: StridedArray[bool]
+
+  StridedArray*[T] = ref object of StridedArrayObj[T]
 
 
-proc initNilStridedArray[T](shape: openarray[int]): StridedArray[T] =
+proc shallowCopy*[T](arr: StridedArray[T]): StridedArray[T] =
 
+  new result
+  result.shape = arr.shape
+  result.ndim = arr.ndim
+  result.size = arr.size
+  result.strides = arr.strides
+  result.offset = arr.offset
+  shallowCopy(result.data, arr.data)
+  result.mask = arr.mask
+
+
+proc newNilStridedArray[T](shape: openarray[int]): StridedArray[T] =
+
+  new result
   result.data = nil
-  result.shape = @shape  # copies deeply
+  result.mask = nil
+  result.shape = @shape
   result.ndim = len(shape)
   result.size = shape.foldl(a*b)
   for i in result.shape:
@@ -41,18 +58,13 @@ proc initNilStridedArray[T](shape: openarray[int]): StridedArray[T] =
 
 proc empty*[T](shape: openarray[int]): StridedArray[T] =
 
-  result = initNilStridedArray[T](shape)
+  result = newNilStridedArray[T](shape)
   result.data = newSeq[T](result.size)
-
-
-proc emptyLike*[T](arr: StridedArray[T]): StridedArray[T] =
-
-  result = empty[T](arr.shape) 
 
 
 proc stridedView*[T](data: seq[T], shape: openarray[int]): StridedArray[T] =
 
-  result = initNilStridedArray[T](shape)
+  result = newNilStridedArray[T](shape)
   if result.size > len(data):
     raise newException(RangeError, "StridedArray shape is larger than provided buffer")
 
@@ -93,6 +105,114 @@ proc rawIx*[T](arr: StridedArray[T], ix: varargs[int]): int {.inline.} =
     if args[i] < 0:
       args[i] += arr.shape[i]
     result += args[i] * arr.strides[i]
+
+
+iterator flat[T](arr: StridedArray[T]): seq[int] =
+
+  if isNil(arr.mask):
+    var ix = newSeq[int](arr.ndim)
+    for dim in 0.. <arr.ndim:
+      ix[dim]=0
+    for i in 0.. <arr.size:
+      yield ix
+      for dim in countdown(arr.ndim-1,0):
+        ix[dim] += 1
+        if ix[dim] == arr.shape[dim]:
+          ix[dim] = 0
+        else:
+          break
+
+  else:
+    var ix = newSeq[int](arr.ndim)
+    for dim in 0.. <arr.ndim:
+      ix[dim]=0
+    for i in 0.. <arr.size:
+      if arr.mask[ix]:
+        yield ix
+      for dim in countdown(arr.ndim-1,0):
+        ix[dim] += 1
+        if ix[dim] == arr.shape[dim]:
+          ix[dim] = 0
+        else:
+          break
+
+
+iterator flatraw[T](arr: StridedArray[T]): int =
+
+  if isNil(arr.mask):
+    var ix = newSeq[int](arr.ndim)
+    for dim in 0.. <arr.ndim:
+      ix[dim]=0
+    for i in 0.. <arr.size:
+      yield arr.rawIx(ix)
+      for dim in countdown(arr.ndim-1,0):
+        ix[dim] += 1
+        if ix[dim] == arr.shape[dim]:
+          ix[dim] = 0
+        else:
+          break
+
+  else:
+    var ix = newSeq[int](arr.ndim)
+    for dim in 0.. <arr.ndim:
+      ix[dim]=0
+    for i in 0.. <arr.size:
+      if arr.mask[ix]:
+        yield arr.rawIx(ix)
+      for dim in countdown(arr.ndim-1,0):
+        ix[dim] += 1
+        if ix[dim] == arr.shape[dim]:
+          ix[dim] = 0
+        else:
+          break
+
+
+proc equal[T](arr1: StridedArray[T], arr2: StridedArray[T]): bool =
+
+  if isNil(arr1):
+    if isNil(arr2):
+      return true
+    else:
+      return false
+
+  if isNil(arr2):
+    return false
+
+  if arr1.shape != arr2.shape:
+    return false
+  if arr1.ndim != arr2.ndim:
+    return false
+  if arr1.size != arr2.size:
+    return false
+  if arr1.strides != arr2.strides:
+    return false
+  if arr1.offset != arr2.offset:
+    return false
+  
+  for ix in arr1.flat:
+    if arr1[ix] != arr2[ix]:
+      return false
+
+  if not equal(arr1.mask, arr2.mask):
+    return false
+
+
+proc deepCopy*[T](arr: StridedArray[T]): StridedArray[T] =
+
+  if isNil(arr):
+    return nil
+
+  result = empty[T](arr.shape)
+  for ix in arr.flat:
+    result[ix] = arr[ix]
+
+  result.mask = arr.mask.deepCopy
+
+
+proc emptyLike*[T](arr: StridedArray[T]): StridedArray[T] =
+
+  result = empty[T](arr.shape)
+  result.mask = arr.mask.deepCopy
 
 
 template `[]`*[T](arr: StridedArray[T], ix: varargs[int]): expr =
@@ -376,12 +496,7 @@ proc `[]`*[T](arr: StridedArray[T], ix: varargs[SteppedSlice]): StridedArray[T] 
   if len(args) != arr.ndim:
     raise newException(IndexError, "new StridedArray must have same shape as original")
 
-  result.shape = arr.shape
-  result.ndim = arr.ndim
-  result.size = arr.size
-  result.strides = arr.strides
-  result.offset = arr.offset
-  shallowCopy(result.data, arr.data)
+  result = arr.shallowCopy
 
   # first check that ranges make sense
   for i in 0..(len(args)-1):
@@ -427,34 +542,13 @@ proc `[]`*[T](arr: StridedArray[T], ix: varargs[SteppedSlice]): StridedArray[T] 
     result.size *= result.shape[i]
 
 
-iterator flat[T](arr: StridedArray[T]): seq[int] =
+proc `[]`*[T](arr: StridedArray[T], mask: StridedArray[bool]): StridedArray[T] =
 
-  var ix = newSeq[int](arr.ndim)
-  for dim in 0.. <arr.ndim:
-    ix[dim]=0
-  for i in 0.. <arr.size:
-    yield ix
-    for dim in countdown(arr.ndim-1,0):
-      ix[dim] += 1
-      if ix[dim] == arr.shape[dim]:
-        ix[dim] = 0
-      else:
-        break
+  if mask.shape != arr.shape:
+    raise newException(RangeError, "boolean mask must have same shape as StridedArray")
 
-
-iterator flatraw[T](arr: StridedArray[T]): int =
-
-  var ix = newSeq[int](arr.ndim)
-  for dim in 0.. <arr.ndim:
-    ix[dim]=0
-  for i in 0.. <arr.size:
-    yield arr.rawIx(ix)
-    for dim in countdown(arr.ndim-1,0):
-      ix[dim] += 1
-      if ix[dim] == arr.shape[dim]:
-        ix[dim] = 0
-      else:
-        break
+  result = arr.shallowCopy
+  result.mask = mask.shallowCopy
 
 
 proc fill*[T](arr: var StridedArray[T], val: T) =
@@ -474,6 +568,7 @@ macro vectorizeBinOpArrScalarT*(op, T, Tout: expr): stmt {.immediate.} =
              proc $1*[$2](arr: StridedArray[$2], s: $2): StridedArray[$3] =
 
                result = empty[$3](arr.shape)
+               result.mask = arr.mask
                for ix in arr.flat:
                  result[ix] = $1[$2](arr[ix], s) 
              """ % [opstr, $T, $Tout]
@@ -491,6 +586,7 @@ macro vectorizeBinOpScalarArrT*(op, T, Tout: expr): stmt {.immediate.} =
              proc $1*[$2](s: $2, arr: StridedArray[$2]): StridedArray[$3] =
 
                result = empty[$3](arr.shape)
+               result.mask = arr.mask
                for ix in arr.flat:
                  result[ix] = $1[$2](s, arr[ix]) 
              """ % [opstr, $T, $Tout]
@@ -510,7 +606,11 @@ macro vectorizeBinOpArrArrT*(op, T, Tout: expr): stmt {.immediate.} =
                if arr.shape != s.shape:
                  raise newException(RangeError, "StridedArrays must have same shape")
 
+               if not equal(arr.mask, s.mask):
+                 raise newException(RangeError, "StridedArrays must be masked the same")
+
                result = empty[$3](arr.shape)
+               result.mask = arr.mask
                for ix in arr.flat:
                  result[ix] = $1[$2](arr[ix], s[ix]) 
              """ % [opstr, $T, $Tout]
@@ -535,6 +635,7 @@ macro vectorizeBinOpArrTScalarS*(op, T, S, Tout: expr): stmt {.immediate.} =
              proc $1*[$2, $3](arr: StridedArray[$2], s: $3): StridedArray[$4] =
 
                result = empty[$4](arr.shape)
+               result.mask = arr.mask
                for ix in arr.flat:
                  result[ix] = $1[$2, $3](arr[ix], s) 
              """ % [opstr, $T, $S, $Tout]
@@ -552,6 +653,7 @@ macro vectorizeBinOpScalarSArrT*(op, S, T, Tout: expr): stmt {.immediate.} =
              proc $1*[$2, $3](s: $2, arr: StridedArray[$3]): StridedArray[$4] =
 
                result = empty[$4](arr.shape)
+               result.mask = arr.mask
                for ix in arr.flat:
                  result[ix] = $1[$2, $3](s, arr[ix]) 
              """ % [opstr, $S, $T, $Tout]
@@ -571,7 +673,11 @@ macro vectorizeBinOpArrTArrS*(op, T, S, Tout: expr): stmt {.immediate.} =
                if arr.shape != s.shape:
                  raise newException(RangeError, "StridedArrays must have same shape")
 
+               if not equal(arr.mask, s.mask):
+                 raise newException(RangeError, "StridedArrays must be masked the same")
+
                result = empty[$4](arr.shape)
+               result.mask = arr.mask
                for ix in arr.flat:
                  result[ix] = $1[$2, $3](arr[ix], s[ix]) 
              """ % [opstr, $T, $S, $Tout]
@@ -614,6 +720,9 @@ macro vectorizeInplaceOpArrArrT*(op, T: expr): stmt {.immediate.} =
                if arr.shape != s.shape:
                  raise newException(RangeError, "StridedArrays must have same shape")
 
+               if not equal(arr.mask, s.mask):
+                 raise newException(RangeError, "StridedArrays must be masked the same")
+
                for ix in arr.flat:
                  $1(arr[ix], s[ix]) 
              """ % [opstr, $T]
@@ -637,6 +746,7 @@ macro vectorizeUnaryOpArrT*(op, T, Tout: expr): stmt {.immediate.} =
              proc $1*[$2](arr: StridedArray[$2]): StridedArray[$3] =
 
                result = empty[$3](arr.shape)
+               result.mask = arr.mask
                for ix in arr.flat:
                  result[ix] = $1[$2](arr[ix]) 
              """ % [opstr, $T, $Tout]
@@ -649,6 +759,7 @@ macro vectorizeTypeConversion*(totype, T: expr): stmt {.immediate.} =
              proc to$1*[$2](arr: StridedArray[$2]): StridedArray[$1] =
 
                result = empty[$1](arr.shape)
+               result.mask = arr.mask
                for ix in arr.flat:
                  result[ix] = $1(arr[ix]) 
              """ % [$totype, $T]
@@ -696,10 +807,6 @@ vectorizeBinOpT(fmod, float, float)
 vectorizeBinOpT(`^`, T, T)
 vectorizeBinOpT(gcd, T, T)
 vectorizeBinOpT(lcm, T, T)
-
-
-vectorizeBinOpTS(`is`, T, S, bool)
-vectorizeBinOpTS(`of`, T, S, bool)
 
 
 vectorizeInplaceOpT(add, string)
@@ -790,13 +897,12 @@ when isMainModule:
     check arr.offset == 0
     check arr.data == raw
   
-  test "`=` performs a *deep* copy":
+  test "`=` gives another reference to the same object FIXME":
     var oldval = arr[0,0,0]
     var arrdeep = arr
     check arrdeep[0,0,0] == oldval
     arr[0,0,0] = high(int)
-    check arr[0,0,0] == high(int)
-    check arrdeep[0,0,0] == oldval
+    check arrdeep[0,0,0] == high(int)
     arr[0,0,0] = oldval
 
   test "Invalid index shape throws IndexError":
@@ -1206,19 +1312,19 @@ when isMainModule:
       check notmask[ix] == not arr[ix]
 
   test "`+=` works":
-    var temp = arr # deep copy
+    var temp = arr.deepCopy
     temp += 1 
     for ix in temp.flat:
       check temp[ix] == arr[ix] + 1
 
   test "`-=` works":
-    var temp = arr # deep copy
+    var temp = arr.deepCopy
     temp -= 1 
     for ix in temp.flat:
       check temp[ix] == arr[ix] - 1
 
   test "`*=` works":
-    var temp = arr # deep copy
+    var temp = arr.deepCopy
     temp *= 2 
     for ix in temp.flat:
       check temp[ix] == arr[ix] * 2 
@@ -1355,3 +1461,8 @@ when isMainModule:
 
 
   # FIXME check other unary operations
+  
+  var boolmask = arr > 5
+  var maskedarr = arr[boolmask]
+  var temp = maskedarr + 100
+  echo temp
