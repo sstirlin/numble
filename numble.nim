@@ -196,6 +196,8 @@ proc equal[T](arr1: StridedArray[T], arr2: StridedArray[T]): bool =
   if not equal(arr1.mask, arr2.mask):
     return false
 
+  return true
+
 
 proc deepCopy*[T](arr: StridedArray[T]): StridedArray[T] =
 
@@ -210,6 +212,9 @@ proc deepCopy*[T](arr: StridedArray[T]): StridedArray[T] =
 
 
 proc emptyLike*[T](arr: StridedArray[T]): StridedArray[T] =
+
+  if isNil(arr):
+    return nil
 
   result = empty[T](arr.shape)
   result.mask = arr.mask.deepCopy
