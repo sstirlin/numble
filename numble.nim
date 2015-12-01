@@ -21,19 +21,23 @@ type
     data*: seq[T]
     mask*: StridedArray[bool]
 
+
   StridedArray*[T] = ref object of StridedArrayObj[T]
 
 
 proc shallowCopy*[T](arr: StridedArray[T]): StridedArray[T] =
 
+  # strings and seqs are technically ref types, but they have
+  # special behavior:  `=` copies them deeply
+  # for other ref types, `=` is shallow
   new result
-  result.shape = arr.shape
-  result.ndim = arr.ndim
-  result.size = arr.size
-  result.strides = arr.strides
-  result.offset = arr.offset
-  shallowCopy(result.data, arr.data)
-  result.mask = arr.mask
+  result.shape = arr.shape  # deep
+  result.ndim = arr.ndim  # deep
+  result.size = arr.size  # deep
+  result.strides = arr.strides  # deep
+  result.offset = arr.offset  # deep
+  shallowCopy(result.data, arr.data)  # explicitly shallow
+  result.mask = arr.mask  # shallow (since StridedArray is a ref type)
 
 
 proc newNilStridedArray[T](shape: openarray[int]): StridedArray[T] =
@@ -43,10 +47,11 @@ proc newNilStridedArray[T](shape: openarray[int]): StridedArray[T] =
   result.mask = nil
   result.shape = @shape
   result.ndim = len(shape)
-  result.size = shape.foldl(a*b)
+  result.size = 1
   for i in result.shape:
     if i < 1:
       raise newException(RangeError, "StridedArray shape must be list of integers > 0")
+    result.size *= i
 
   result.strides = newSeq[int](result.ndim)
   result.strides[result.ndim-1] = 1
@@ -240,22 +245,6 @@ proc `[]=`*[T](arr: var StridedArray[T], ix: seq[int], rhs: T) =
   arr.data[arr.rawIx(ix)] = rhs
 
 
-type
-
-  SteppedSlice* = object of RootObj
-    a*, b*: int 
-    step*: int
-    incEnd*: bool
-
-
-proc initSteppedSlice*(a, b, step: int, incEnd: bool): SteppedSlice =
-
-  result.a = a
-  result.b = b
-  result.step = step
-  result.incEnd = incEnd
-
-
 const _ = high(int)
     
 
@@ -274,20 +263,31 @@ macro `[]`[T](arr: StridedArray[T], e: string): expr =
       elif len(ixs) == 1:
         code.add(ixs[0])
       elif len(ixs) > 1:
-        # convert from pythonic [,) to nimlike [,] intervals
+        # if first index is empty, fill in default
         if strip(ixs[0]) == "":
           ixs[0] = $_
+        # if second index is empty, fill in default
         if strip(ixs[1]) == "":
           ixs[1] = $_
-        if len(ixs) == 3: # see if we should step other than default
-          if strip(ixs[2]) == "":
-            ixs[2] = "1"
-        else:
+        # if step if missing, fill in default
+        if len(ixs) < 3:
           ixs.add("1")
+        elif strip(ixs[2]) == "":
+          ixs[2] = "1"
+        
+        # convert from pythonic [,) to nimlike [,] intervals
+        # by adding or subtracting 1 (depending on the sign of "step")
+        if ixs[1] != $_:  # NOTE: leave alone if default value
+          ixs[1].add("-(")
+          ixs[1].add(ixs[2])
+          ixs[1].add(")/abs(")
+          ixs[1].add(ixs[2])
+          ixs[1].add(")")
+
         code.add("int(")
         code.add(ixs[0])
         code.add(")")
-        code.add("...")
+        code.add("..")
         code.add("int(")
         code.add(ixs[1])
         code.add(")")
@@ -302,200 +302,289 @@ macro `[]`[T](arr: StridedArray[T], e: string): expr =
   parseExpr(code)
 
 
-proc `..`*(a: int, b: int): SteppedSlice =
+type
+
+  SteppedSlice*[T] = object of RootObj
+    a*, b*: T
+    step*: T
+
+
+proc initSteppedSlice*[T](a, b, step: T): SteppedSlice[T] =
+
+  result.a = a
+  result.b = b
+  result.step = step
+
+
+# need an iterator so that SteppedSlice can be used in for loops (just like Slice)
+
+iterator items*[T](s: SteppedSlice[T]): T =
+
+  if s.a <= s.b:
+    for val in countup(s.a, s.b, s.step):
+      yield val
+  else:
+    for val in countdown(s.a, s.b, -s.step):  # countdown expects positive step
+      yield val
+
+
+# This might be stupid.  Overriding `..` family of operators to return SteppedSlice instead of Slice
+
+proc `..`*[T](a, b: T): SteppedSlice[T] =
 
   result.a = a
   result.b = b
   result.step = 1
-  result.incEnd = true
 
 
-proc `..-`*(a: int, b: int): SteppedSlice =
+proc `..+`*[T](a, b: T): SteppedSlice[T] =
+
+  result.a = a
+  result.b = b
+  result.step = 1
+
+
+proc `..-`*[T](a, b: T): SteppedSlice[T] =
 
   result.a = a
   result.b = -b
   result.step = 1
-  result.incEnd = true
 
 
-proc `..+`*(a: int, b: int): SteppedSlice =
+# We need these because, when we write
+#   a..b|step
+#
+# The compiler sees this
+#   a..(b|step)
+#
+# not this
+#   (a..b)|step
+#
+# See the comments about `|` below
 
-  result.a = a
-  result.b = b
-  result.step = 1
-  result.incEnd = true
 
-
-proc `..`*(a: int, s: SteppedSlice): SteppedSlice =
+proc `..`*[T](a: T, s: SteppedSlice[T]): SteppedSlice[T] =
 
   result.a = a
   result.b = s.b
   result.step = s.step
-  result.incEnd = true
 
 
-proc `..-`*(a: int, s: SteppedSlice): SteppedSlice =
+proc `..+`*[T](a: T, s: SteppedSlice[T]): SteppedSlice[T] =
+
+  result.a = a
+  result.b = s.b
+  result.step = s.step
+
+
+proc `..-`*[T](a: T, s: SteppedSlice[T]): SteppedSlice[T] =
 
   result.a = a
   result.b = -s.b
   result.step = s.step
-  result.incEnd = true
 
 
-proc `..+`*(a: int, s: SteppedSlice): SteppedSlice =
+# Support for `..<` style syntax
+
+# THIS IS NOW REWRITTEN TO ".. <" BY THE STANDARD LIB
+#proc `..<`*[T](a, b: T): SteppedSlice[T] =
+#
+#  result.a = a
+#  result.b = pred(b)
+#  result.step = 1
+
+
+proc `..<-`*[T](a, b: T): SteppedSlice[T] =
 
   result.a = a
-  result.b = s.b
-  result.step = s.step
-  result.incEnd = true
-
-
-proc `...`*(a: int, b: int): SteppedSlice =
-
-  result.a = a
-  result.b = b
+  result.b = pred(-b)
   result.step = 1
-  result.incEnd = false
 
 
-proc `...-`*(a: int, b: int): SteppedSlice =
+proc `..<+`*[T](a, b: T): SteppedSlice[T] =
 
   result.a = a
-  result.b = -b
+  result.b = pred(b)
   result.step = 1
-  result.incEnd = false
 
 
-proc `...+`*(a: int, b: int): SteppedSlice =
+# We need these because, when we write
+#   a..<b|step
+#
+# The compiler sees this
+#   a..<(b|step)
+#
+# not this
+#   (a..<b)|step
+#
+# See the comments about `|` below
+
+# THIS IS NOW REWRITTEN TO ".. <" BY THE STANDARD LIB
+#proc `..<`*[T](a: T, s: SteppedSlice): SteppedSlice[T] =
+#
+#  result.a = a
+#  result.b = pred(s.b)
+#  result.step = s.step
+
+
+proc `..<-`*[T](a: T, s: SteppedSlice[T]): SteppedSlice[T] =
 
   result.a = a
-  result.b = b
-  result.step = 1
-  result.incEnd = false
-
-
-proc `...`*(a: int, s: SteppedSlice): SteppedSlice =
-
-  result.a = a
-  result.b = s.b
+  result.b = pred(-s.b)
   result.step = s.step
-  result.incEnd = false
 
 
-proc `...-`*(a: int, s: SteppedSlice): SteppedSlice =
-
-  result.a = a
-  result.b = -s.b
-  result.step = s.step
-  result.incEnd = false
-
-
-proc `...+`*(a: int, s: SteppedSlice): SteppedSlice =
+proc `..<+`*[T](a: T, s: SteppedSlice[T]): SteppedSlice[T] =
 
   result.a = a
-  result.b = s.b
+  result.b = pred(s.b)
   result.step = s.step
-  result.incEnd = false
 
 
-proc `|`*(b: int, step: int): SteppedSlice =
+# UnaryLt operators (necessary because system.nim rewrites `..<` as `.. <`)
 
-  result.a = 0
+proc `<`*[T](s: SteppedSlice[T]): SteppedSlice[T] =
+
+  result.a = s.a
+  result.b = pred(s.b)
+  result.step = s.step
+
+
+proc `<-`*[T](s: SteppedSlice[T]): SteppedSlice[T] =
+
+  result.a = s.a
+  result.b = pred(-s.b)
+  result.step = s.step
+
+
+proc `<+`*[T](s: SteppedSlice[T]): SteppedSlice[T] =
+
+  result.a = s.a
+  result.b = pred(s.b)
+  result.step = s.step
+
+
+# Backfill UnaryLt operators missing from system.nim
+
+# already supplied in system.nim
+#proc `<`*[T](a: T): T =
+#
+#  result = pred(a)
+
+proc `<-`*[T](a: T): T =
+
+  result = pred(-a)
+
+
+proc `<+`*[T](a: T): T =
+
+  result = pred(a)
+
+
+# Since `|` is a high-precedence operator, in an expression
+# like this:
+#   a..b|step
+#
+# The compiler actually sees this
+#   a..(b|step)
+#
+# not this
+#   (a..b)|step
+
+proc `|`*[T](b, step: T): SteppedSlice[T] =
+
+  result.a = _
   result.b = b
   result.step = step
-  result.incEnd = true
 
 
-proc `|-`*(b: int, step: int): SteppedSlice =
+proc `|-`*[T](b, step: T): SteppedSlice[T] =
 
-  result.a = 0
+  result.a = _
   result.b = b
   result.step = -step
-  result.incEnd = true
 
 
-proc `|+`*(b: int, step: int): SteppedSlice =
+proc `|+`*[T](b, step: T): SteppedSlice[T] =
 
-  result.a = 0
+  result.a = _
   result.b = b
   result.step = step
-  result.incEnd = true
 
 
-proc `|`*(s: SteppedSlice, step: int): SteppedSlice =
+# these are probably unnecessary because `|` is a high-precedence operator
+# See the commentary above
+
+proc `|`*[T](s: SteppedSlice[T], step: T): SteppedSlice[T] =
 
   result.a = s.a
   result.b = s.b
   result.step = step
-  result.incEnd = s.incEnd
 
 
-proc `|-`*(s: SteppedSlice, step: int): SteppedSlice =
+proc `|-`*[T](s: SteppedSlice[T], step: T): SteppedSlice[T] =
 
   result.a = s.a
   result.b = s.b
   result.step = -step
-  result.incEnd = s.incEnd
 
 
-proc `|+`*(s: SteppedSlice, step: int): SteppedSlice =
+proc `|+`*[T](s: SteppedSlice[T], step: T): SteppedSlice[T] =
 
   result.a = s.a
   result.b = s.b
   result.step = step
-  result.incEnd = s.incEnd
 
 
-proc `..|`*(step: int): SteppedSlice =
+# unary creation operators (a=default, b=default)
+
+proc `..|`*[T](step: T): SteppedSlice[T] =
 
   result.a = _
   result.b = _
   result.step = step
-  result.incEnd = true
 
 
-proc `..|-`*(step: int): SteppedSlice =
+proc `..|-`*[T](step: T): SteppedSlice[T] =
 
   result.a = _
   result.b = _
   result.step = -step
-  result.incEnd = true
 
 
-proc `..|+`*(step: int): SteppedSlice =
+proc `..|+`*[T](step: T): SteppedSlice[T] =
 
   result.a = _
   result.b = _
   result.step = step
-  result.incEnd = true
 
 
-let all = initSteppedSlice(0,0,0,true)
+let all = initSteppedSlice[int](0,0,0)
 
 
-proc `[]`*[T](arr: StridedArray[T], ix: varargs[SteppedSlice]): StridedArray[T] =
+proc `[]`*[T](arr: StridedArray[T], ix: varargs[SteppedSlice[int]]): StridedArray[T] =
 
-  var args = newSeq[SteppedSlice](0)
+  var args = newSeq[SteppedSlice[int]](0)
   
   # If 'all' specified in front or back then expand it
   if ix[0] == all:
-    for i in 1..(len(ix)-1):
+    for i in 1.. <len(ix):
       if ix[i] == all:
         raise newException(IndexError, "'all' is only allowed either at the front or back of an StridedArray, and never at the same time")
     for i in 1..(arr.ndim-(len(ix)-1)):
       args.add(..|1)
-    for i in 1..(len(ix)-1):
+    for i in 1.. <len(ix):
       args.add(ix[i])
   elif ix[len(ix)-1] == all:
-    for i in 0..(len(ix)-2):
+    for i in 0.. <(len(ix)-1):
       if ix[i] == all:
         raise newException(IndexError, "'all' is only allowed either at the front or back of an StridedArray, and never at the same time")
-    for i in 0..(len(ix)-2):
+    for i in 0.. <(len(ix)-1):
       args.add(ix[i])
     for i in 1..(arr.ndim-(len(ix)-1)):
       args.add(..|1)
   else:
-    for i in 0..(len(ix)-1):
+    for i in 0.. <len(ix):
       args.add(ix[i])
 
   if len(args) != arr.ndim:
@@ -509,17 +598,11 @@ proc `[]`*[T](arr: StridedArray[T], ix: varargs[SteppedSlice]): StridedArray[T] 
     if args[i].step < 0:
       if args[i].b == _:
         args[i].b = 0
-      else:
-        if not args[i].incEnd:
-          args[i].b += 1
       if args[i].a == _:
         args[i].a = arr.shape[i]-1 
     else:
       if args[i].b == _:
         args[i].b = arr.shape[i]-1 
-      else:
-        if not args[i].incEnd:
-          args[i].b -= 1
       if args[i].a == _:
         args[i].a = 0
 
@@ -861,7 +944,6 @@ vectorizeTypeConversion(float64, T)
 
 
 when isMainModule:
-
 
   test "Can create empty StridedArray and fill it with a value":
     var arr = empty[float]([3,4,3])
