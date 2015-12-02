@@ -25,21 +25,6 @@ type
   StridedArray*[T] = ref object of StridedArrayObj[T]
 
 
-proc shallowCopy*[T](arr: StridedArray[T]): StridedArray[T] =
-
-  # strings and seqs are technically ref types, but they have
-  # special behavior:  `=` copies them deeply
-  # for other ref types, `=` is shallow
-  new result
-  result.shape = arr.shape  # deep
-  result.ndim = arr.ndim  # deep
-  result.size = arr.size  # deep
-  result.strides = arr.strides  # deep
-  result.offset = arr.offset  # deep
-  shallowCopy(result.data, arr.data)  # explicitly shallow
-  result.mask = arr.mask  # shallow (since StridedArray is a ref type)
-
-
 proc newNilStridedArray[T](shape: openarray[int]): StridedArray[T] =
 
   new result
@@ -112,7 +97,7 @@ proc rawIx*[T](arr: StridedArray[T], ix: varargs[int]): int {.inline.} =
     result += args[i] * arr.strides[i]
 
 
-iterator flat[T](arr: StridedArray[T]): seq[int] =
+iterator indices[T](arr: StridedArray[T]): seq[int] =
 
   if isNil(arr.mask):
     var ix = newSeq[int](arr.ndim)
@@ -142,7 +127,7 @@ iterator flat[T](arr: StridedArray[T]): seq[int] =
           break
 
 
-iterator flatraw[T](arr: StridedArray[T]): int =
+iterator flat[T](arr: StridedArray[T]): int =
 
   if isNil(arr.mask):
     var ix = newSeq[int](arr.ndim)
@@ -194,7 +179,7 @@ proc equal[T](arr1: StridedArray[T], arr2: StridedArray[T]): bool =
   if arr1.offset != arr2.offset:
     return false
   
-  for ix in arr1.flat:
+  for ix in arr1.indices:
     if arr1[ix] != arr2[ix]:
       return false
 
@@ -204,13 +189,28 @@ proc equal[T](arr1: StridedArray[T], arr2: StridedArray[T]): bool =
   return true
 
 
+proc shallowCopy*[T](arr: StridedArray[T]): StridedArray[T] =
+
+  # strings and seqs are technically ref types, but they have
+  # special behavior:  `=` copies them deeply
+  # for other ref types, `=` is shallow
+  new result
+  result.shape = arr.shape  # deep
+  result.ndim = arr.ndim  # deep
+  result.size = arr.size  # deep
+  result.strides = arr.strides  # deep
+  result.offset = arr.offset  # deep
+  shallowCopy(result.data, arr.data)  # explicitly shallow
+  result.mask = arr.mask  # shallow (since StridedArray is a ref type)
+
+
 proc deepCopy*[T](arr: StridedArray[T]): StridedArray[T] =
 
   if isNil(arr):
     return nil
 
   result = empty[T](arr.shape)
-  for ix in arr.flat:
+  for ix in arr.indices:
     result[ix] = arr[ix]
 
   result.mask = arr.mask.deepCopy
@@ -536,6 +536,50 @@ proc `|+`*[T](s: SteppedSlice[T], step: T): SteppedSlice[T] =
   result.step = step
 
 
+# support for syntax like `>..`
+
+proc `>..`*[T](a, b: T): SteppedSlice[T] =
+
+  result.a = pred(a)
+  result.b = b
+  result.step = 1
+
+
+proc `>..-`*[T](a, b: T): SteppedSlice[T] =
+
+  result.a = pred(a)
+  result.b = -b
+  result.step = 1
+
+
+proc `>..+`*[T](a, b: T): SteppedSlice[T] =
+
+  result.a = pred(a)
+  result.b = b
+  result.step = 1
+
+
+proc `>..`*[T](a: T, s: SteppedSlice): SteppedSlice[T] =
+
+  result.a = pred(a)
+  result.b = s.b
+  result.step = s.step
+
+
+proc `>..-`*[T](a: T, s: SteppedSlice[T]): SteppedSlice[T] =
+
+  result.a = pred(a)
+  result.b = -s.b
+  result.step = s.step
+
+
+proc `>..+`*[T](a: T, s: SteppedSlice[T]): SteppedSlice[T] =
+
+  result.a = pred(a)
+  result.b = s.b
+  result.step = s.step
+
+
 # unary creation operators (a=default, b=default)
 
 proc `..|`*[T](step: T): SteppedSlice[T] =
@@ -641,7 +685,7 @@ proc `[]`*[T](arr: StridedArray[T], mask: StridedArray[bool]): StridedArray[T] =
 
 proc fill*[T](arr: var StridedArray[T], val: T) =
 
-  for ix in arr.flat:
+  for ix in arr.indices:
     arr[ix] = val
 
 
@@ -657,7 +701,7 @@ macro vectorizeBinOpArrScalarT*(op, T, Tout: expr): stmt {.immediate.} =
 
                result = empty[$3](arr.shape)
                result.mask = arr.mask
-               for ix in arr.flat:
+               for ix in arr.indices:
                  result[ix] = $1[$2](arr[ix], s) 
              """ % [opstr, $T, $Tout]
   result = parseStmt(body)
@@ -675,7 +719,7 @@ macro vectorizeBinOpScalarArrT*(op, T, Tout: expr): stmt {.immediate.} =
 
                result = empty[$3](arr.shape)
                result.mask = arr.mask
-               for ix in arr.flat:
+               for ix in arr.indices:
                  result[ix] = $1[$2](s, arr[ix]) 
              """ % [opstr, $T, $Tout]
   result = parseStmt(body)
@@ -699,7 +743,7 @@ macro vectorizeBinOpArrArrT*(op, T, Tout: expr): stmt {.immediate.} =
 
                result = empty[$3](arr.shape)
                result.mask = arr.mask
-               for ix in arr.flat:
+               for ix in arr.indices:
                  result[ix] = $1[$2](arr[ix], s[ix]) 
              """ % [opstr, $T, $Tout]
   result = parseStmt(body)
@@ -724,7 +768,7 @@ macro vectorizeBinOpArrTScalarS*(op, T, S, Tout: expr): stmt {.immediate.} =
 
                result = empty[$4](arr.shape)
                result.mask = arr.mask
-               for ix in arr.flat:
+               for ix in arr.indices:
                  result[ix] = $1[$2, $3](arr[ix], s) 
              """ % [opstr, $T, $S, $Tout]
   result = parseStmt(body)
@@ -742,7 +786,7 @@ macro vectorizeBinOpScalarSArrT*(op, S, T, Tout: expr): stmt {.immediate.} =
 
                result = empty[$4](arr.shape)
                result.mask = arr.mask
-               for ix in arr.flat:
+               for ix in arr.indices:
                  result[ix] = $1[$2, $3](s, arr[ix]) 
              """ % [opstr, $S, $T, $Tout]
   result = parseStmt(body)
@@ -766,7 +810,7 @@ macro vectorizeBinOpArrTArrS*(op, T, S, Tout: expr): stmt {.immediate.} =
 
                result = empty[$4](arr.shape)
                result.mask = arr.mask
-               for ix in arr.flat:
+               for ix in arr.indices:
                  result[ix] = $1[$2, $3](arr[ix], s[ix]) 
              """ % [opstr, $T, $S, $Tout]
   result = parseStmt(body)
@@ -789,7 +833,7 @@ macro vectorizeInplaceOpArrScalarT*(op, T: expr): stmt {.immediate.} =
   let body = """
              proc $1*[$2](arr: var StridedArray[$2], s: $2) =
 
-               for ix in arr.flat:
+               for ix in arr.indices:
                  $1(arr[ix], s) 
              """ % [opstr, $T]
   result = parseStmt(body)
@@ -811,7 +855,7 @@ macro vectorizeInplaceOpArrArrT*(op, T: expr): stmt {.immediate.} =
                if not equal(arr.mask, s.mask):
                  raise newException(RangeError, "StridedArrays must be masked the same")
 
-               for ix in arr.flat:
+               for ix in arr.indices:
                  $1(arr[ix], s[ix]) 
              """ % [opstr, $T]
   result = parseStmt(body)
@@ -835,7 +879,7 @@ macro vectorizeUnaryOpArrT*(op, T, Tout: expr): stmt {.immediate.} =
 
                result = empty[$3](arr.shape)
                result.mask = arr.mask
-               for ix in arr.flat:
+               for ix in arr.indices:
                  result[ix] = $1[$2](arr[ix]) 
              """ % [opstr, $T, $Tout]
   result = parseStmt(body)
@@ -848,7 +892,7 @@ macro vectorizeTypeConversion*(totype, T: expr): stmt {.immediate.} =
 
                result = empty[$1](arr.shape)
                result.mask = arr.mask
-               for ix in arr.flat:
+               for ix in arr.indices:
                  result[ix] = $1(arr[ix]) 
              """ % [$totype, $T]
   result = parseStmt(body)
@@ -945,13 +989,13 @@ vectorizeTypeConversion(float64, T)
 
 when isMainModule:
 
-  test "Can create empty StridedArray and fill it with a value":
+  test "Can create empty StridedArray of specific shape and fill it with a value":
     var arr = empty[float]([3,4,3])
     arr.fill(5.0)
-    for ix in arr.flat:
+    for ix in arr.indices:
       check arr[ix] == 5.0
 
-  # or we can attach to an existing sequence with a shallow view
+  # or we can attach to a raw sequence
   # using the "stridedView" proc
   var raw = newSeq[int](36)
   for i in 0..35:
@@ -984,12 +1028,12 @@ when isMainModule:
     check arr.offset == 0
     check arr.data == raw
   
-  test "`=` gives another reference to the same object FIXME":
+  test "`=` gives another reference to the same object":
     var oldval = arr[0,0,0]
-    var arrdeep = arr
-    check arrdeep[0,0,0] == oldval
+    var arrshallow = arr
+    check arrshallow[0,0,0] == oldval
     arr[0,0,0] = high(int)
-    check arrdeep[0,0,0] == high(int)
+    check arrshallow[0,0,0] == high(int)
     arr[0,0,0] = oldval
 
   test "Invalid index shape throws IndexError":
@@ -1062,6 +1106,41 @@ when isMainModule:
         for k in 0..2:
           check revarr[i,j,k] == k + 3*j + 12*i
 
+  test "..< syntax works":
+    var arr2 = arr[0..<arr.shape[0], 0..<arr.shape[1], 0..<arr.shape[2]]
+    for i in arr2.flat:
+      check arr2.data[i] == arr.data[i]
+
+  test "..< with step | syntax works":
+    var arr2 = arr[0..<arr.shape[0]|1, 0..<arr.shape[1]|1, 0..<arr.shape[2]|1]
+    for i in arr2.flat:
+      check arr2.data[i] == arr.data[i]
+
+  test ">.. syntax works":
+    var revarr = arr[arr.shape[0]>..0|-1, arr.shape[1]>..0|-1, arr.shape[2]>..0|-1]
+    for i in 0..2:
+      for j in 0..3:
+        for k in 0..2:
+          check revarr[i,j,k] == k + 3*j + 12*i
+
+  test "we haven't ruined the syntax ..< for ordinary use":
+    var count = 0
+    for i in 0..<100:
+      check i == count
+      count += 1 
+    count = 0
+    for i in 0.. <100:  # notice the space!
+      check i == count
+      count += 1 
+    count = 0
+    for i in 0..<100|2:  # now supports step sizes!
+      check i == count
+      count += 2 
+    count = 99 
+    for i in 100>..0|-2:  # counting backwards works
+      check i == count
+      count -= 2
+
   test "Pythonic `a:b:step` syntax can be passed as a string (`b` is *excluded*)":
     var revarr = arr["2:-1:-1, 3:-1:-1, 2:-1:-1"]
     for i in 0..2:
@@ -1093,7 +1172,7 @@ when isMainModule:
 
   test "A view does not change the underlying data - it is still reversed":
     var revarr = arr[..|-1, ..|-1, ..|-1]
-    for i in 0.. <revarr.size:
+    for i in 0..<revarr.size:
       check revarr.data[i] == 35 - i
 
   test "A view is shallow - it shares the same underlying buffer":
@@ -1115,13 +1194,13 @@ when isMainModule:
 
   test "\"all\" is used like \"...\" is used in Python":
     var arr1 = arr[all]
-    for ix in arr1.flat:
+    for ix in arr1.indices:
       check arr1[ix] == arr[ix]
     var arr2 = arr[all, ..|1]
-    for ix in arr2.flat:
+    for ix in arr2.indices:
       check arr2[ix] == arr[ix]
     var arr3 = arr[..|1, all]
-    for ix in arr3.flat:
+    for ix in arr3.indices:
       check arr3[ix] == arr[ix]
 
   test "A view of a view works - let's reverse the last index again":
@@ -1170,19 +1249,19 @@ when isMainModule:
     check subarr.strides == @[-24,-6,-1]
     check subarr.offset == 35
 
-  test "\"flat\" returns an iterator":
+  test "\"indices\" returns an iterator":
+    var subarr = arr[..|2, ..|2, ..|2]
+    var truth = @[0,2,6,8,24,26,30,32]
+    var i = 0
+    for ix in subarr.indices:
+      check subarr[ix] == truth[i]
+      i += 1
+
+  test "\"flat\" returns an iterator to raw data":
     var subarr = arr[..|2, ..|2, ..|2]
     var truth = @[0,2,6,8,24,26,30,32]
     var i = 0
     for ix in subarr.flat:
-      check subarr[ix] == truth[i]
-      i += 1
-
-  test "\"flatraw\" returns an iterator to raw data":
-    var subarr = arr[..|2, ..|2, ..|2]
-    var truth = @[0,2,6,8,24,26,30,32]
-    var i = 0
-    for ix in subarr.flatraw:
      check subarr.data[ix] == truth[i]
      i += 1
 
@@ -1190,7 +1269,7 @@ when isMainModule:
 
     # arr == scalar
     var boolmask = arr == 5
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] == 5:
         check boolmask[i] == true
       else:
@@ -1198,7 +1277,7 @@ when isMainModule:
     
     # scalar == arr
     boolmask = 5 == arr
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] == 5:
         check boolmask[i] == true
       else:
@@ -1209,7 +1288,7 @@ when isMainModule:
     allfives.fill(5)
 
     boolmask = arr == allfives
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] == 5:
         check boolmask[i] == true
       else:
@@ -1219,7 +1298,7 @@ when isMainModule:
 
     # arr == scalar
     var boolmask = arr == 5 or arr == 6
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] == 5 or arr[i] == 6:
         check boolmask[i] == true
       else:
@@ -1227,7 +1306,7 @@ when isMainModule:
     
     # scalar == arr
     boolmask = 5 == arr or 6 == arr
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] == 5 or arr[i] == 6:
         check boolmask[i] == true
       else:
@@ -1240,7 +1319,7 @@ when isMainModule:
     allsixes.fill(6)
 
     boolmask = arr == allfives or arr == allsixes
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] == 5 or arr[i] == 6:
         check boolmask[i] == true
       else:
@@ -1250,7 +1329,7 @@ when isMainModule:
 
     # arr == scalar
     var boolmask = arr == 5 and arr == 6
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] == 5 and arr[i] == 6:
         check boolmask[i] == true
       else:
@@ -1258,7 +1337,7 @@ when isMainModule:
     
     # scalar == arr
     boolmask = 5 == arr and 6 == arr
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] == 5 and arr[i] == 6:
         check boolmask[i] == true
       else:
@@ -1271,7 +1350,7 @@ when isMainModule:
     allsixes.fill(6)
 
     boolmask = arr == allfives and arr == allsixes
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] == 5 and arr[i] == 6:
         check boolmask[i] == true
       else:
@@ -1281,7 +1360,7 @@ when isMainModule:
 
     # arr < scalar
     var boolmask = arr < 5
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] < 5:
         check boolmask[i] == true
       else:
@@ -1289,7 +1368,7 @@ when isMainModule:
     
     # scalar < arr
     boolmask = 5 < arr
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] > 5:
         check boolmask[i] == true
       else:
@@ -1300,7 +1379,7 @@ when isMainModule:
     allfives.fill(5)
 
     boolmask = arr < allfives
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] < 5:
         check boolmask[i] == true
       else:
@@ -1310,7 +1389,7 @@ when isMainModule:
 
     # arr <= scalar
     var boolmask = arr <= 5
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] <= 5:
         check boolmask[i] == true
       else:
@@ -1318,7 +1397,7 @@ when isMainModule:
     
     # scalar <= arr
     boolmask = 5 <= arr
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] >= 5:
         check boolmask[i] == true
       else:
@@ -1329,7 +1408,7 @@ when isMainModule:
     allfives.fill(5)
 
     boolmask = arr <= allfives
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] <= 5:
         check boolmask[i] == true
       else:
@@ -1339,7 +1418,7 @@ when isMainModule:
 
     # arr > scalar
     var boolmask = arr > 5
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] > 5:
         check boolmask[i] == true
       else:
@@ -1347,7 +1426,7 @@ when isMainModule:
     
     # scalar > arr
     boolmask = 5 > arr
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] < 5:
         check boolmask[i] == true
       else:
@@ -1358,7 +1437,7 @@ when isMainModule:
     allfives.fill(5)
 
     boolmask = arr > allfives
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] > 5:
         check boolmask[i] == true
       else:
@@ -1368,7 +1447,7 @@ when isMainModule:
 
     # arr >= scalar
     var boolmask = arr >= 5
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] >= 5:
         check boolmask[i] == true
       else:
@@ -1376,7 +1455,7 @@ when isMainModule:
     
     # scalar >= arr
     boolmask = 5 >= arr
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] <= 5:
         check boolmask[i] == true
       else:
@@ -1387,7 +1466,7 @@ when isMainModule:
     allfives.fill(5)
 
     boolmask = arr >= allfives
-    for i in arr.flat:
+    for i in arr.indices:
       if arr[i] >= 5:
         check boolmask[i] == true
       else:
@@ -1395,31 +1474,31 @@ when isMainModule:
 
   test "`not` works":
     var notmask = not arr
-    for ix in notmask.flat:
+    for ix in notmask.indices:
       check notmask[ix] == not arr[ix]
 
   test "`+=` works":
     var temp = arr.deepCopy
     temp += 1 
-    for ix in temp.flat:
+    for ix in temp.indices:
       check temp[ix] == arr[ix] + 1
 
   test "`-=` works":
     var temp = arr.deepCopy
     temp -= 1 
-    for ix in temp.flat:
+    for ix in temp.indices:
       check temp[ix] == arr[ix] - 1
 
   test "`*=` works":
     var temp = arr.deepCopy
     temp *= 2 
-    for ix in temp.flat:
+    for ix in temp.indices:
       check temp[ix] == arr[ix] * 2 
 
   test "`/=` works":
     var temp = arr.toFloat
     temp /= 2 
-    for ix in temp.flat:
+    for ix in temp.indices:
       check temp[ix] == arr[ix] / 2 
 
   test "string \"add\" works":
@@ -1485,16 +1564,16 @@ when isMainModule:
   test "^ works":
 
     var temp = arr^2
-    for ix in temp.flat:
+    for ix in temp.indices:
       check temp[ix] == arr[ix]^2
 
     temp = 2^arr
-    for ix in temp.flat:
+    for ix in temp.indices:
       check temp[ix] == 2^arr[ix]
 
     var evenodd = arr mod 2
     temp = arr^evenodd
-    for ix in temp.flat:
+    for ix in temp.indices:
       if arr[ix] mod 2 == 0:
         check temp[ix] == 1
       else:
@@ -1503,16 +1582,16 @@ when isMainModule:
   test "+ works":
 
     var temp = arr+2
-    for ix in temp.flat:
+    for ix in temp.indices:
       check temp[ix] == arr[ix]+2
 
     temp = 2+arr
-    for ix in temp.flat:
+    for ix in temp.indices:
       check temp[ix] == 2+arr[ix]
 
     var evenodd = arr mod 2
     temp = arr+evenodd
-    for ix in temp.flat:
+    for ix in temp.indices:
       if arr[ix] mod 2 == 0:
         check temp[ix] == arr[ix] 
       else:
@@ -1521,16 +1600,16 @@ when isMainModule:
   test "`binom` works":
 
     var temp = binom(arr, 2)
-    for ix in temp.flat:
+    for ix in temp.indices:
       check temp[ix] == binom(arr[ix], 2)
 
     temp = binom(35, arr)
-    for ix in temp.flat:
+    for ix in temp.indices:
       check temp[ix] == binom(35, arr[ix])
 
     var evenodd = arr mod 2
     temp = binom(arr, evenodd)
-    for ix in temp.flat:
+    for ix in temp.indices:
       if arr[ix] mod 2 == 0:
         check temp[ix] == binom(arr[ix], 0)
       else:
@@ -1543,7 +1622,7 @@ when isMainModule:
   test "\"sqrt\" works":
     var temp = toFloat(arr)
     temp = sqrt(temp) 
-    for ix in temp.flat:
+    for ix in temp.indices:
       check temp[ix] == sqrt(float(arr[ix]))
 
 
