@@ -683,6 +683,25 @@ proc `[]`*[T](arr: StridedArray[T], mask: StridedArray[bool]): StridedArray[T] =
   result.mask = mask.shallowCopy
 
 
+proc `[]=`*[T](arr: var StridedArray[T], mask: StridedArray[bool], rhs: StridedArray[T]) =
+
+  if arr.shape != rhs.shape:
+    raise newException(RangeError, "lhs must have same shape as rhs")
+
+  if mask.shape != arr.shape:
+    raise newException(RangeError, "boolean mask must have same shape as StridedArray")
+  
+  if isNil(rhs.mask):
+    raise newException(RangeError, "rhs must be masked")
+
+  for ix in mask.indices:
+    if mask[ix] != rhs.mask[ix]:
+      raise newException(RangeError, "rhs mask must match lhs mask")
+
+  for ix in rhs.indices:
+    arr.data[arr.rawIx(ix)] = rhs.data[rhs.rawIx(ix)]
+
+
 proc fill*[T](arr: var StridedArray[T], val: T) =
 
   for ix in arr.indices:
@@ -1629,6 +1648,9 @@ when isMainModule:
   # FIXME check other unary operations
   
   var boolmask = arr > 5
-  var maskedarr = arr[boolmask]
-  var temp = maskedarr + 100
-  echo temp
+  var maskedarr = arr[boolmask] + 100
+  echo maskedarr
+  echo arr
+
+  arr[boolmask] = arr[boolmask] + 100 
+  echo arr[boolmask]
